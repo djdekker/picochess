@@ -5079,14 +5079,10 @@ async def main() -> None:
             l_filename = "games" + os.sep + file_name
             if pgn_game is None:
                 try:
-                    l_file_pgn = open(l_filename, encoding="utf-8-sig")
-                    if not l_file_pgn:
-                        return
+                    with open(l_filename, encoding="utf-8-sig") as l_file_pgn:
+                        l_game_pgn: Game | None = chess.pgn.read_game(l_file_pgn)
                 except OSError:
                     return
-
-                l_game_pgn: Game | None = chess.pgn.read_game(l_file_pgn)
-                l_file_pgn.close()
             else:
                 l_game_pgn = pgn_game
                 l_filename = file_name
