@@ -647,6 +647,16 @@ class TestServerWebEngineSelection(unittest.TestCase):
 
 
 class TestServerEngineBookSelection(unittest.TestCase):
+    def setUp(self):
+        self.book_file = "books/test.bin"
+        self.book = {
+            "file": self.book_file,
+            "text": _display_text_from_label("Test Book"),
+        }
+        opening_books = patch("server.get_opening_books", return_value=[self.book])
+        opening_books.start()
+        self.addCleanup(opening_books.stop)
+
     def test_engine_book_choices_exclude_obooksrv_and_are_json_safe(self):
         books = _engine_book_choices()
         self.assertTrue(books)
@@ -658,7 +668,9 @@ class TestServerEngineBookSelection(unittest.TestCase):
         self.assertIsNone(_select_engine_book(OBOOKSRV_BOOK_FILE))
 
     def test_select_engine_book_resolves_configured_book_file(self):
-        selected = _select_engine_book(_configured_engine_book_file())
+        entries = {"book": {"value": self.book_file, "enabled": True}}
+        with patch("server._load_ini_entries", return_value=("picochess.ini", [], [], entries)):
+            selected = _select_engine_book(_configured_engine_book_file())
         self.assertIsNotNone(selected)
         self.assertNotEqual(OBOOKSRV_BOOK_FILE, selected["file"])
         self.assertTrue(selected["label"])
