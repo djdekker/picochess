@@ -537,8 +537,8 @@ class PicochessState:
         self.takeback_active = False
         self.tc_init_last = None
         self.think_time = 0
-        self.time_control: TimeControl = None
-        self.rating: Rating = None
+        self.time_control: TimeControl | None = None
+        self.rating: Rating | None = None
         self.coach_triggered = False
         self.last_error_fen = ""
         self.artwork_in_use = False
@@ -4597,7 +4597,7 @@ async def main() -> None:
                 await self._start_or_stop_analysis_as_needed()
                 return None
             info: InfoDict | None = None
-            info_list: list[InfoDict] = None
+            info_list: list[InfoDict] | None = None
             info_list_source: str | None = None
             info_for_web_engine: list[InfoDict] | None = None
             info_for_web_tutor: list[InfoDict] | None = None
