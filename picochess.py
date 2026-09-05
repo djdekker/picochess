@@ -5591,6 +5591,8 @@ async def main() -> None:
         async def final_exit_or_reboot_cleanups(self):
             """Last cleanups before exit or reboot"""
             logger.debug("final exit_or_reboot_cleanups")
+            if isinstance(self.dgtboard, DgtBoard):
+                await self.dgtboard.stop()
             if getattr(self.state, "pairing_bridge", None):
                 await self.state.pairing_bridge.close()
             if self.pico_talker:
@@ -8185,6 +8187,10 @@ async def main() -> None:
 
         def exit_sigterm(self, signum, frame):
             """A handler function to register for systemctl stop signal"""
+            if self.shutdown_requested.is_set():
+                logger.debug("Shutdown already in progress; ignoring signal %s", signum)
+                return
+            self.shutdown_requested.set()
             logger.debug("Received kill signal, shutting down")
             asyncio.create_task(self._exit_async())
 

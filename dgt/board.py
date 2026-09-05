@@ -20,7 +20,7 @@ import platform
 import struct
 import logging
 import subprocess
-from threading import Lock
+from threading import Event, Lock
 from fcntl import fcntl, F_GETFL, F_SETFL
 from os import O_NONBLOCK, read, path, listdir
 from serial import Serial, SerialException, STOPBITS_ONE, PARITY_NONE, EIGHTBITS  # type: ignore
@@ -106,6 +106,7 @@ class DgtBoard(EBoard):
         self.serial = None
         self.lock = Lock()  # lock the serial write
         self.incoming_board_task: Optional[asyncio.Task] = None
+        self.stop_requested = Event()
         self.lever_pos: Optional[int] = None
         # the next three are only used for "not dgtpi" mode
         self.clock_lock: float = 0.0  # serial connected clock is locked
@@ -560,7 +561,7 @@ class DgtBoard(EBoard):
                 logger.warning("falsely DGT_SEND_EE_MOVES send before => receive and ignore EE_MOVES result")
                 self.watchdog_timer.stop()  # this serial read gonna take around 8secs
                 now = time.time()
-                while counter > 0:
+                while counter > 0 and not self.stop_requested.is_set():
                     ee_moves = self._read_serial(counter)
                     if self.serial:
                         logger.debug(
@@ -582,7 +583,7 @@ class DgtBoard(EBoard):
             logger.warning("illegal id in message header 0x%x length: %i", message_id, message_length)
             return message
 
-        while counter:
+        while counter and not self.stop_requested.is_set():
             byte = self._read_serial()
             try:
                 if byte:
@@ -604,15 +605,19 @@ class DgtBoard(EBoard):
     def _process_incoming_board_forever(self):
         counter = 0
         logger.info("incoming_board ready")
-        while True:
+        while not self.stop_requested.is_set():
             byte = b""
             if self.serial:
                 byte = self._read_serial()
             else:
+                if self.stop_requested.is_set():
+                    break
                 self._setup_serial_port()
                 if self.serial:
                     logger.debug("sleeping for 0.5 secs. Afterwards startup the (ser) board")
                     time.sleep(0.5)
+                    if self.stop_requested.is_set():
+                        break
                     counter = 0
                     self._startup_serial_board()
             if byte and byte[0] & 0x80:
@@ -1128,4 +1133,24 @@ class DgtBoard(EBoard):
         if self.incoming_board_task and not self.incoming_board_task.done():
             logger.debug("incoming board task already running")
             return
+        self.stop_requested.clear()
         self.incoming_board_task = self.loop.create_task(asyncio.to_thread(self._process_incoming_board_forever))
+
+    async def stop(self):
+        """Stop the serial board reader and wait for its worker thread to finish."""
+        self.stop_requested.set()
+        self.watchdog_timer.stop()
+        self.version_timer.stop()
+        self.stop_field_timer()
+        serial = self.serial
+        self.serial = None
+        if serial is not None:
+            try:
+                serial.close()
+            except (OSError, SerialException):
+                logger.debug("error while closing serial board connection", exc_info=True)
+        if self.incoming_board_task is not None:
+            try:
+                await self.incoming_board_task
+            except asyncio.CancelledError:
+                pass
