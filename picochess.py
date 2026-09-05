@@ -144,6 +144,12 @@ async def gather_main_tasks(tasks, shutdown_requested: asyncio.Event) -> None:
             raise
 
 
+async def wait_for_shutdown_cleanup(shutdown_requested: asyncio.Event, shutdown_complete: asyncio.Event) -> None:
+    """Keep the event loop alive until an intentional shutdown has released its resources."""
+    if shutdown_requested.is_set():
+        await shutdown_complete.wait()
+
+
 def selected_engine_analysis_depth(engine_plays: bool) -> int:
     """Return the selected main-engine ContinuousAnalysis depth limit."""
     if platform.machine().lower() == "aarch64" and not engine_plays:
@@ -1563,6 +1569,7 @@ async def main() -> None:
     # except the main_loop task which we terminate by sending a None into the async queue
     non_main_tasks: Set[asyncio.Task] = set()
     shutdown_requested = asyncio.Event()
+    shutdown_complete = asyncio.Event()
 
     # The class dgtDisplay fires Event (Observable) & DispatchDgt (Dispatcher)
     my_dgt_display = DgtDisplay(
@@ -1772,6 +1779,7 @@ async def main() -> None:
             shared: dict,
             non_main_tasks: Set[asyncio.Task],
             shutdown_requested: asyncio.Event,
+            shutdown_complete: asyncio.Event,
         ):
             self.loop = loop
             self._task = None  # placeholder for message consumer task
@@ -1797,6 +1805,7 @@ async def main() -> None:
             self.shared.setdefault("system_info", {})["game_started"] = self.state.game_started
             self.non_main_tasks = non_main_tasks
             self.shutdown_requested = shutdown_requested
+            self.shutdown_complete = shutdown_complete
             self.update_status = None
             self.git_status = None
             ###########################################
@@ -5606,6 +5615,7 @@ async def main() -> None:
             # by putting None in the main event queue
             logger.debug("final exit_or_reboot_cleanups done - stopping main evt_queue")
             await Observable.fire(None)
+            self.shutdown_complete.set()
 
         def can_do_next_pgn_replay_move(self) -> bool:
             """check if we can do the next pgn move"""
@@ -8232,6 +8242,7 @@ async def main() -> None:
         shared,
         non_main_tasks,
         shutdown_requested,
+        shutdown_complete,
     )
 
     await my_main.initialise(time_text)
@@ -8241,6 +8252,7 @@ async def main() -> None:
     all_tasks = set(non_main_tasks)
     all_tasks.add(main_task)
     await gather_main_tasks(all_tasks, shutdown_requested)
+    await wait_for_shutdown_cleanup(shutdown_requested, shutdown_complete)
     logger.debug("all tasks done, exiting main loop and picochess program")
     # await asyncio.Event().wait()  # wait forever
 

@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from picochess import gather_main_tasks
+from picochess import gather_main_tasks, wait_for_shutdown_cleanup
 
 
 class TestMainTaskShutdown(unittest.IsolatedAsyncioTestCase):
@@ -30,3 +30,21 @@ class TestMainTaskShutdown(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "task failed"):
             await gather_main_tasks({asyncio.create_task(fail())}, shutdown_requested)
+
+    async def test_intentional_shutdown_waits_for_cleanup_completion(self):
+        shutdown_requested = asyncio.Event()
+        shutdown_complete = asyncio.Event()
+        shutdown_requested.set()
+
+        wait_task = asyncio.create_task(wait_for_shutdown_cleanup(shutdown_requested, shutdown_complete))
+        await asyncio.sleep(0)
+        self.assertFalse(wait_task.done())
+
+        shutdown_complete.set()
+        await wait_task
+
+    async def test_normal_task_completion_does_not_wait_for_shutdown_cleanup(self):
+        shutdown_requested = asyncio.Event()
+        shutdown_complete = asyncio.Event()
+
+        await wait_for_shutdown_cleanup(shutdown_requested, shutdown_complete)
