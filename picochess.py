@@ -134,6 +134,15 @@ WEB_SERVER_PERMISSION_FALLBACK_PORT = 8080
 WEB_SERVER_SETCAP_HINT = "sudo setcap 'cap_net_bind_service=+ep' $(readlink -f $(which python3))"
 
 
+async def gather_main_tasks(tasks, shutdown_requested: asyncio.Event) -> None:
+    """Wait for application tasks, suppressing cancellation only during an intentional shutdown."""
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        if not shutdown_requested.is_set():
+            raise
+
+
 def selected_engine_analysis_depth(engine_plays: bool) -> int:
     """Return the selected main-engine ContinuousAnalysis depth limit."""
     if platform.machine().lower() == "aarch64" and not engine_plays:
@@ -1552,6 +1561,7 @@ async def main() -> None:
     # collect all tasks for later cancellation at exit, shutdown, or reboot
     # except the main_loop task which we terminate by sending a None into the async queue
     non_main_tasks: Set[asyncio.Task] = set()
+    shutdown_requested = asyncio.Event()
 
     # The class dgtDisplay fires Event (Observable) & DispatchDgt (Dispatcher)
     my_dgt_display = DgtDisplay(
@@ -1760,6 +1770,7 @@ async def main() -> None:
             args,
             shared: dict,
             non_main_tasks: Set[asyncio.Task],
+            shutdown_requested: asyncio.Event,
         ):
             self.loop = loop
             self._task = None  # placeholder for message consumer task
@@ -1784,6 +1795,7 @@ async def main() -> None:
             self.shared = shared
             self.shared.setdefault("system_info", {})["game_started"] = self.state.game_started
             self.non_main_tasks = non_main_tasks
+            self.shutdown_requested = shutdown_requested
             self.update_status = None
             self.git_status = None
             ###########################################
@@ -5556,6 +5568,7 @@ async def main() -> None:
         async def pre_exit_or_reboot_cleanups(self):
             """First immediate cleanups before exit or reboot"""
             logger.debug("pre exit_or_reboot_cleanups")
+            self.shutdown_requested.set()
             if self.state.fen_timer_running:
                 self.state.stop_fen_timer()
             # @todo are there other timers to stop here?
@@ -8204,15 +8217,16 @@ async def main() -> None:
         args,
         shared,
         non_main_tasks,
+        shutdown_requested,
     )
 
     await my_main.initialise(time_text)
     main_task = main_loop.create_task(my_main.event_consumer())  # start main message loop
     board_wait_task = main_loop.create_task(my_main.wait_for_board_connection())
     non_main_tasks.add(board_wait_task)  # ensure it gets cancelled on shutdown if still waiting
-    all_tasks = non_main_tasks
+    all_tasks = set(non_main_tasks)
     all_tasks.add(main_task)
-    await asyncio.gather(*all_tasks)  # wait until all tasks are done
+    await gather_main_tasks(all_tasks, shutdown_requested)
     logger.debug("all tasks done, exiting main loop and picochess program")
     # await asyncio.Event().wait()  # wait forever
 
