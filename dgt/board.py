@@ -1147,7 +1147,7 @@ class DgtBoard(EBoard):
         if serial is not None:
             try:
                 serial.close()
-            except (OSError, SerialException):
+            except (OSError, SerialException, TypeError):
                 logger.debug("error while closing serial board connection", exc_info=True)
         if self.incoming_board_task is not None:
             try:

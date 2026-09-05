@@ -33,3 +33,15 @@ class TestDgtBoardShutdown(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(board.stop_requested.is_set())
         board._process_incoming_board_forever.assert_called_once_with()
+
+    async def test_stop_tolerates_serial_connection_already_being_closed(self):
+        loop = asyncio.get_running_loop()
+        board = DgtBoard("/dev/test", False, False, False, loop)
+        serial = Mock()
+        serial.close.side_effect = TypeError("descriptor already closed")
+        board.serial = serial
+
+        await board.stop()
+
+        self.assertIsNone(board.serial)
+        serial.close.assert_called_once_with()
