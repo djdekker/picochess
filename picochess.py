@@ -150,6 +150,22 @@ async def wait_for_shutdown_cleanup(shutdown_requested: asyncio.Event, shutdown_
         await shutdown_complete.wait()
 
 
+def track_event_task(task: asyncio.Task, event_tasks: set[asyncio.Task]) -> None:
+    """Keep an event-handler task alive and consume its result when it finishes."""
+    event_tasks.add(task)
+
+    def event_task_done(completed_task: asyncio.Task) -> None:
+        event_tasks.discard(completed_task)
+        try:
+            completed_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Unhandled exception while processing main event")
+
+    task.add_done_callback(event_task_done)
+
+
 def selected_engine_analysis_depth(engine_plays: bool) -> int:
     """Return the selected main-engine ContinuousAnalysis depth limit."""
     if platform.machine().lower() == "aarch64" and not engine_plays:
@@ -1804,6 +1820,7 @@ async def main() -> None:
             self.shared = shared
             self.shared.setdefault("system_info", {})["game_started"] = self.state.game_started
             self.non_main_tasks = non_main_tasks
+            self.event_tasks: set[asyncio.Task] = set()
             self.shutdown_requested = shutdown_requested
             self.shutdown_complete = shutdown_complete
             self.update_status = None
@@ -5576,7 +5593,8 @@ async def main() -> None:
                     # issue #45 still let main loop create tasks
                     # @todo check if this should not do create_task either
                     # create_task should make program more responsive to user tasks
-                    asyncio.create_task(self.process_main_events(event))
+                    event_task = asyncio.create_task(self.process_main_events(event))
+                    track_event_task(event_task, self.event_tasks)
                     evt_queue.task_done()
                     await asyncio.sleep(0.05)  # balancing message queues
             except asyncio.CancelledError:

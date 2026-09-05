@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from picochess import gather_main_tasks, wait_for_shutdown_cleanup
+from picochess import gather_main_tasks, track_event_task, wait_for_shutdown_cleanup
 
 
 class TestMainTaskShutdown(unittest.IsolatedAsyncioTestCase):
@@ -48,3 +48,31 @@ class TestMainTaskShutdown(unittest.IsolatedAsyncioTestCase):
         shutdown_complete = asyncio.Event()
 
         await wait_for_shutdown_cleanup(shutdown_requested, shutdown_complete)
+
+    async def test_tracked_event_task_is_retained_until_completion(self):
+        event_tasks = set()
+        release_task = asyncio.Event()
+        task = asyncio.create_task(release_task.wait())
+
+        track_event_task(task, event_tasks)
+        self.assertIn(task, event_tasks)
+
+        release_task.set()
+        await task
+        await asyncio.sleep(0)
+        self.assertNotIn(task, event_tasks)
+
+    async def test_tracked_event_task_exception_is_retrieved_and_logged(self):
+        event_tasks = set()
+
+        async def fail():
+            raise RuntimeError("event failed")
+
+        with self.assertLogs("picochess", level="ERROR") as captured:
+            task = asyncio.create_task(fail())
+            track_event_task(task, event_tasks)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        self.assertNotIn(task, event_tasks)
+        self.assertIn("Unhandled exception while processing main event", captured.output[0])
