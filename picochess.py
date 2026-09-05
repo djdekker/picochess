@@ -124,6 +124,7 @@ WEB_ANALYSIS_MULTIPV = 3  # maximum backend analysis lines shown by the web clie
 # ENGINE PLAYING
 # Dont make the following large as it will block engine play go
 FLOAT_MAX_ANALYSE_TIME = 0.1  # asking for hint while not pondering
+ENGINE_SHUTDOWN_IDLE_TIMEOUT = 3.0
 
 ONLINE_PREFIX = "Online"
 
@@ -2300,16 +2301,23 @@ async def main() -> None:
             self.state.automatic_takeback = False
             self.state.ignore_next_engine_move = False  # dont ignore engine move we now request
 
-        async def stop_search(self):
+        async def stop_search(self, timeout: float | None = None) -> bool:
             """Stop current search."""
             await self.engine.stop()
             if self.engine.consume_forced_analyser_stop():
                 logger.debug("forced analyser stop detected - resetting best depth cache")
                 self.state.best_sent_depth.reset()
-            if not self.emulation_mode():
+            if self.emulation_mode():
+                return True
+            if timeout is None:
                 while not self.engine.is_waiting():
                     await asyncio.sleep(0.05)
                     logger.debug("engine is still not waiting")
+                return True
+            idle = await self.engine.wait_until_idle(timeout)
+            if not idle:
+                logger.warning("engine still not idle after %.1fs; continuing shutdown", timeout)
+            return idle
 
         async def stop_search_and_clock(self, ponder_hit=False):
             """Depending on the interaction mode stop search and clock."""
@@ -5573,7 +5581,7 @@ async def main() -> None:
                 self.state.stop_fen_timer()
             # @todo are there other timers to stop here?
             # as we wait 5 secs before exiting we only want to prevent timer actions
-            await self.stop_search()
+            await self.stop_search(timeout=ENGINE_SHUTDOWN_IDLE_TIMEOUT)
             await self.state.stop_clock()
             await self.engine.quit()
             if self.state.picotutor:
