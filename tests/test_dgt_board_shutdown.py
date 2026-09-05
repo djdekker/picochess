@@ -45,3 +45,24 @@ class TestDgtBoardShutdown(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(board.serial)
         serial.close.assert_called_once_with()
+
+    async def test_read_tolerates_descriptor_closed_by_shutdown(self):
+        loop = asyncio.get_running_loop()
+        board = DgtBoard("/dev/test", False, False, False, loop)
+        board.serial = Mock()
+        board.serial.read.side_effect = TypeError("descriptor already closed")
+
+        self.assertEqual(board._read_serial(), b"")
+
+    async def test_stop_tolerates_reader_failing_during_serial_close(self):
+        loop = asyncio.get_running_loop()
+        board = DgtBoard("/dev/test", False, False, False, loop)
+
+        async def reader_failed():
+            raise TypeError("descriptor already closed")
+
+        board.incoming_board_task = asyncio.create_task(reader_failed())
+
+        await board.stop()
+
+        self.assertTrue(board.incoming_board_task.done())

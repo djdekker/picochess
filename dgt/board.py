@@ -539,7 +539,7 @@ class DgtBoard(EBoard):
     def _read_serial(self, bytes_toread=1):
         try:
             return self.serial.read(bytes_toread)
-        except SerialException:
+        except (SerialException, TypeError):
             pass
         except AttributeError:  # serial is None (race condition)
             pass
@@ -1154,3 +1154,5 @@ class DgtBoard(EBoard):
                 await self.incoming_board_task
             except asyncio.CancelledError:
                 pass
+            except (OSError, SerialException, TypeError):
+                logger.debug("serial board reader stopped after connection closed", exc_info=True)
