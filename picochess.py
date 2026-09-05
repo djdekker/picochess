@@ -8210,8 +8210,8 @@ async def main() -> None:
             try:
                 await self.pre_exit_or_reboot_cleanups()
                 await self.final_exit_or_reboot_cleanups()
-            except Exception as e:
-                logger.error("Error during shutdown: %s", e)
+            except Exception:
+                logger.exception("Error during shutdown")
                 sys.exit(-1)  # force exit on error
 
         async def wait_for_board_connection(self):
