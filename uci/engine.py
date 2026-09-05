@@ -1920,6 +1920,12 @@ class UciEngine(object):
             return not self.playing.is_waiting_for_move()
         return True
 
+    async def wait_until_idle(self, timeout: float | None = None) -> bool:
+        """Wait until the playing search is idle without exposing its implementation."""
+        if not self.playing:
+            return True
+        return await self.playing.wait_until_idle(timeout)
+
     def is_ready(self):
         """Engine waiting."""
         return True  # should not be needed any more
