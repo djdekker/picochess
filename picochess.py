@@ -4200,9 +4200,7 @@ async def main() -> None:
         # C. engine PlayingContinuousAnalysis
         #    - engine-thinking path when it's engine's turn (used regardless of tutor on/off)
         # (ignore picotutor obvious_engine here; it is shallow helper analysis)
-
-
-        def is_coach_analyser(self) -> bool:
+        def is_coach_analyser(self) -> bool:  # noqa: E306 - policy comment belongs directly above this helper
             """Return True when tutor analysis should replace engine analysis."""
             return should_use_tutor_analysis(
                 interaction_mode=self.state.interaction_mode,
