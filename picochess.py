@@ -4174,7 +4174,6 @@ async def main() -> None:
                 logger.warning("engine is still not waiting")
             # @ todo - check how to do this in new chess library
             # self.engine.position(copy.deepcopy(game))
-
         # Analysis routing has four main cases.
         # IMPORTANT: `analyse()` has two outputs:
         # 1) clock/DGT output via send_analyse() (depth-gated by best_sent_depth)
