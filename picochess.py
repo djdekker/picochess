@@ -1904,14 +1904,14 @@ async def main() -> None:
             """Due to use of async some initialisation is moved here"""
 
             # issue 106 - get update and git status information for the user
-            self.update_status = self.get_last_update_status()
+            self.update_status = await asyncio.to_thread(self.get_last_update_status)
             logger.info("Update status: %s", self.update_status)
             # This is shown for a very short time - you can also see it in the menu
             if self.update_status:
                 self.state.dgttranslate.set_last_updated_info(self.update_status)
                 msg = Message.SHOW_TEXT(text_string=self.update_status)
                 await DisplayMsg.show(msg)
-            self.git_status = self.get_git_status()
+            self.git_status = await asyncio.to_thread(self.get_git_status)
             if self.git_status:
                 self.state.dgttranslate.set_git_info(self.git_status)
 
@@ -5610,9 +5610,11 @@ async def main() -> None:
                 self.state.stop_fen_timer()
             # @todo are there other timers to stop here?
             # as we wait 5 secs before exiting we only want to prevent timer actions
-            await self.stop_search(timeout=ENGINE_SHUTDOWN_IDLE_TIMEOUT)
+            if self.engine is not None:
+                await self.stop_search(timeout=ENGINE_SHUTDOWN_IDLE_TIMEOUT)
             await self.state.stop_clock()
-            await self.engine.quit()
+            if self.engine is not None:
+                await self.engine.quit()
             if self.state.picotutor:
                 # close all the picotutor engines
                 await self.state.picotutor.exit_or_reboot_cleanups()
