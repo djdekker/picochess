@@ -8,7 +8,6 @@ from dgt.api import Message
 from dgt.util import Mode
 from picochess import (
     loaded_pgn_interaction_mode,
-    mame_history_snapshot_pgn,
     mame_requires_fresh_fen_root,
     pgn_with_board_as_fresh_root,
     remote_move_matches_current_position,

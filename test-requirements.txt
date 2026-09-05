@@ -3,4 +3,4 @@ mypy
 mock
 pylama
 pyflakes
-setuptools<82
+setuptools<81
