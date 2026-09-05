@@ -388,7 +388,7 @@ class Emailer(object):
                 ctype = "application/octet-stream"
             maintype, subtype = ctype.split("/", 1)
             if maintype == "text":
-                with open(path) as fpath:
+                with open(path, encoding="utf-8") as fpath:
                     msg = MIMEText(fpath.read(), _subtype=subtype)
             elif maintype == "image":
                 with open(path, "rb") as fpath:
@@ -808,12 +808,12 @@ class PgnDisplay(DisplayMsg):
         self.last_saved_game = pgn_game
 
         # Save to last game file
-        with open(self.last_file_name, "w") as last_file:
+        with open(self.last_file_name, "w", encoding="utf-8") as last_file:
             last_exporter = chess.pgn.FileExporter(last_file)
             pgn_game_last.accept(last_exporter)
 
         # Append to all games file
-        with open(self.file_name, "a") as file:
+        with open(self.file_name, "a", encoding="utf-8") as file:
             exporter = chess.pgn.FileExporter(file)
             pgn_game.accept(exporter)
 
@@ -844,7 +844,7 @@ class PgnDisplay(DisplayMsg):
                 else:
                     pgn_game.headers["Result"] = "0-1"
 
-        with open(l_file_name, "w") as file:
+        with open(l_file_name, "w", encoding="utf-8") as file:
             exporter = chess.pgn.FileExporter(file)
             pgn_game.accept(exporter)
 

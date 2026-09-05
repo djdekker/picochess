@@ -1169,7 +1169,7 @@ def read_online_result():
     winner = ""
 
     try:
-        with open("online_game.txt", "r") as log_u:
+        with open("online_game.txt", "r", encoding="utf-8") as log_u:
             lines = log_u.readlines()
             for i, line in enumerate(lines, start=1):
                 if i == 9:
@@ -1190,7 +1190,7 @@ def read_online_user_info() -> Tuple[str, str, str, str, int, int]:
     game_time, fischer_inc = 0, 0
 
     try:
-        with open("online_game.txt", "r") as log_u:
+        with open("online_game.txt", "r", encoding="utf-8") as log_u:
             for line in log_u:
                 if "=" not in line:
                     continue
@@ -5060,7 +5060,7 @@ async def main() -> None:
             l_filename = "games" + os.sep + file_name
             if pgn_game is None:
                 try:
-                    l_file_pgn = open(l_filename)
+                    l_file_pgn = open(l_filename, encoding="utf-8-sig")
                     if not l_file_pgn:
                         return
                 except OSError:
@@ -5728,7 +5728,7 @@ async def main() -> None:
             if not pgn_file:
                 return
             try:
-                with open(pgn_file) as f:
+                with open(pgn_file, encoding="utf-8-sig") as f:
                     while True:
                         pgn_game = chess.pgn.read_game(f)
                         if not pgn_game:

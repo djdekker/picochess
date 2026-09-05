@@ -278,6 +278,28 @@ class TestPgnDisplay(unittest.TestCase):
         self.assertIn('[FEN "4k3/8/8/8/8/8/P7/4K3 w - - 0 7"]', saved_text)
         self.assertTrue(saved_text.rstrip().endswith("*"))
 
+    def test_explicit_save_writes_unicode_headers_as_utf8(self):
+        board = chess.Board()
+        message = FakeMessage(board, PlayMode.USER_WHITE)
+        message.mode = Mode.NORMAL
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved_path = os.path.join(tmpdir, "saved.pgn")
+            message.pgn_filename = os.path.relpath(saved_path, "games")
+            testee = PgnDisplay(
+                tmpdir + "/games.pgn",
+                FakeEmailer(),
+                {"headers": {"Event": "Café Schaak"}, "variant": "chess", "loaded_pgn_game": None},
+                self.loop,
+            )
+
+            testee._save_pgn(message)
+
+            with open(saved_path, "r", encoding="utf-8") as saved_file:
+                saved_text = saved_file.read()
+
+        self.assertIn('[Event "Café Schaak"]', saved_text)
+
     def test_game_end_duplicate_check_uses_final_pgn_with_variations(self):
         user_move = chess.Move.from_uci("e2e4")
         board = chess.Board()
