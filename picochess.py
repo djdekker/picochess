@@ -2207,7 +2207,7 @@ async def main() -> None:
                 while not self.engine.is_waiting():
                     await asyncio.sleep(0.05)
                     logger.warning("engine is still not waiting")
-                uci_dict = state.time_control.uci()
+                uci_dict = self.state.time_control.uci()
                 if searchlist:
                     # molli: otherwise might lead to problems with internal books
                     root_moves = self.state.searchmoves.all(self.state.game)
@@ -2238,7 +2238,7 @@ async def main() -> None:
                     )
                     engine_res: PlayResult = await result_queue.get()  # on engine error its None
                     if engine_res:
-                        logger.debug("engine moved %s", engine_res.move.uci)
+                        logger.debug("engine moved %s", engine_res.move.uci())
                         if self.state.ignore_next_engine_move:
                             self.state.ignore_next_engine_move = False  # make sure we handle next move
                             logger.debug("ignored engine move - takeback or state change forced move")
