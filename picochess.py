@@ -411,6 +411,14 @@ class AnalysisSourceContext:
     tutor_analyser_available: bool
 
 
+@dataclass(frozen=True)
+class WebAnalysisSnapshot:
+    """Keep cached web analysis together with the position it describes."""
+
+    info: list[InfoDict] | None
+    fen: str
+
+
 def decide_analysis_source(context: AnalysisSourceContext) -> AnalysisSourceAction:
     """Mirror the existing analysis-source precedence used by ``analyse()``."""
     if context.tutor_is_primary:
@@ -4768,11 +4776,9 @@ async def main() -> None:
             info: InfoDict | None = None
             info_list: list[InfoDict] | None = None
             info_list_source: str | None = None
-            info_for_web_engine: list[InfoDict] | None = None
-            info_for_web_tutor: list[InfoDict] | None = None
+            web_engine_snapshot: WebAnalysisSnapshot | None = None
+            web_tutor_snapshot: WebAnalysisSnapshot | None = None
             analysed_fen = ""  # analysis is only valid for this fen
-            analysed_fen_for_web_engine = ""
-            analysed_fen_for_web_tutor = ""
             if cycle_action == AnalysisCycleAction.STOP_AFTER_GAME_END:
                 await self._start_or_stop_analysis_as_needed()
                 if self.state.picotutor is not None:
@@ -4795,8 +4801,7 @@ async def main() -> None:
                 info_list: list[InfoDict] = result.get("info")
                 info_list_source = "tutor"
                 analysed_fen = result.get("fen", "")
-                info_for_web_tutor = info_list
-                analysed_fen_for_web_tutor = analysed_fen
+                web_tutor_snapshot = WebAnalysisSnapshot(info_list, analysed_fen)
                 if self.state.picotutor.get_board().fen() != self.state.game.fen():
                     logger.warning("picotutor board out of sync with game")
                 info_list = depth_gated_analysis_info(
@@ -4808,8 +4813,7 @@ async def main() -> None:
                 info_list: list[InfoDict] = result.get("info")
                 info_list_source = "engine"
                 analysed_fen = result.get("fen", "")
-                info_for_web_engine = info_list
-                analysed_fen_for_web_engine = analysed_fen
+                web_engine_snapshot = WebAnalysisSnapshot(info_list, analysed_fen)
                 info_list = depth_gated_analysis_info(
                     self.state.best_sent_depth, info_list, analysed_fen, self.state.game
                 )
@@ -4821,8 +4825,7 @@ async def main() -> None:
                     info_list: list[InfoDict] = result.get("info")
                     info_list_source = "engine-thinking"
                     analysed_fen = result.get("fen", "")
-                    info_for_web_engine = info_list
-                    analysed_fen_for_web_engine = analysed_fen
+                    web_engine_snapshot = WebAnalysisSnapshot(info_list, analysed_fen)
                 elif source_action == AnalysisSourceAction.TUTOR_WEB_ONLY:
                     # PicoTutor owns current user-turn analysis.  Keep the
                     # selected engine's final playing-search snapshot; do
@@ -4830,31 +4833,31 @@ async def main() -> None:
                     # refresh the web Engine line.
                     result = await self.state.picotutor.get_analysis()
                     info_candidate_list: list[InfoDict] = result.get("info")
-                    info_for_web_tutor = info_candidate_list
-                    analysed_fen_for_web_tutor = result.get("fen", "")
+                    web_tutor_snapshot = WebAnalysisSnapshot(
+                        info_candidate_list, result.get("fen", "")
+                    )
                 elif source_action == AnalysisSourceAction.ENGINE_CURRENT:
                     analysis_board = self.state.get_move_check_board()
                     result = await self.engine.get_analysis(analysis_board)
                     info_list: list[InfoDict] = result.get("info")
                     info_list_source = "engine"
                     analysed_fen = result.get("fen", "")
-                    info_for_web_engine = info_list
-                    analysed_fen_for_web_engine = analysed_fen
+                    web_engine_snapshot = WebAnalysisSnapshot(info_list, analysed_fen)
                     info_list = depth_gated_analysis_info(
                         self.state.best_sent_depth, info_list, analysed_fen, self.state.game
                     )
                 await self._start_or_stop_analysis_as_needed()
-            if info_for_web_engine:
+            if web_engine_snapshot and web_engine_snapshot.info:
                 await self.send_web_analysis(
-                    info_for_web_engine,
-                    analysed_fen_for_web_engine,
+                    web_engine_snapshot.info,
+                    web_engine_snapshot.fen,
                     "engine",
                     suppress_engine_line=False,
                 )
-            if info_for_web_tutor:
+            if web_tutor_snapshot and web_tutor_snapshot.info:
                 await self.send_web_analysis(
-                    info_for_web_tutor,
-                    analysed_fen_for_web_tutor,
+                    web_tutor_snapshot.info,
+                    web_tutor_snapshot.fen,
                     "tutor",
                     suppress_engine_line=not self.eng_plays(),
                 )
