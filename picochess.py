@@ -4300,13 +4300,14 @@ async def main() -> None:
         # (ignore picotutor obvious_engine here; it is shallow helper analysis)
         def is_coach_analyser(self) -> bool:  # noqa: E306 - policy comment belongs directly above this helper
             """Return True when tutor analysis should replace engine analysis."""
-            return should_use_tutor_analysis(
-                interaction_mode=self.state.interaction_mode,
-                pgn_mode=self.pgn_mode(),
-                engine_should_skip_analyser=bool(self.engine and self.engine.should_skip_engine_analyser()),
-                engine_is_playing=self.eng_plays(),
-                engine_move_was_book=self.state.engine_move_was_book,
-                is_user_turn=self.state.is_user_turn(),
+            return decide_tutor_analysis(
+                TutorAnalysisContext(
+                    interaction_mode=self.state.interaction_mode,
+                    pgn_mode=self.pgn_mode(),
+                    engine_should_skip_analyser=bool(self.engine and self.engine.should_skip_engine_analyser()),
+                    engine_is_playing=self.eng_plays(),
+                    is_user_turn=self.state.is_user_turn(),
+                )
             )
 
         def need_engine_analyser(self) -> bool:
@@ -4362,11 +4363,13 @@ async def main() -> None:
 
         def playing_game_analysis_stopped(self) -> bool:
             """Return true when a completed playing-mode game must not analyse."""
-            return should_stop_analysis_after_game_end(
-                self.state.interaction_mode,
-                self.state.game.is_game_over(),
-                self.state.game_declared,
-                ModeInfo.get_game_ending(),
+            return decide_game_end_analysis_stop(
+                GameEndAnalysisContext(
+                    interaction_mode=self.state.interaction_mode,
+                    game_over=self.state.game.is_game_over(),
+                    game_declared=self.state.game_declared,
+                    game_ending=ModeInfo.get_game_ending(),
+                )
             )
 
         def _set_game_started(self, started: bool) -> None:
