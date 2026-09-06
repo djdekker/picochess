@@ -191,7 +191,27 @@ def selected_engine_analysis_multipv(interaction_mode: Mode, engine_options) -> 
     return requested if requested > 1 else None
 
 
-def _web_analysis_pv(info: InfoDict, analysed_fen: str, move: chess.Move | None) -> list[str]:
+WEB_SAN_PIECE_TRANSLATIONS = {
+    "de": str.maketrans({"R": "T", "N": "S", "B": "L", "Q": "D"}),
+    "nl": str.maketrans({"R": "T", "N": "P", "B": "L", "Q": "D"}),
+    "fr": str.maketrans({"R": "T", "N": "C", "B": "F", "Q": "D", "K": "R"}),
+    "es": str.maketrans({"R": "T", "N": "C", "B": "A", "Q": "D", "K": "R"}),
+    "it": str.maketrans({"R": "T", "N": "C", "B": "A", "Q": "D", "K": "R"}),
+}
+
+
+def localize_web_san(san: str, language: str) -> str:
+    """Translate SAN piece letters using the existing DGT language conventions."""
+    translation = WEB_SAN_PIECE_TRANSLATIONS.get((language or "en").lower())
+    return san.translate(translation) if translation is not None else san
+
+
+def _web_analysis_pv(
+    info: InfoDict,
+    analysed_fen: str,
+    move: chess.Move | None,
+    language: str = "en",
+) -> list[str]:
     """Convert one cached engine PV to SAN, with UCI as a defensive fallback."""
     pv_moves = list(info.get("pv") or [])
     pv_to_send = []
@@ -202,7 +222,7 @@ def _web_analysis_pv(info: InfoDict, analysed_fen: str, move: chess.Move | None)
                 if not pv_move or pv_move == chess.Move.null():
                     break
                 try:
-                    pv_to_send.append(san_board.san(pv_move))
+                    pv_to_send.append(localize_web_san(san_board.san(pv_move), language))
                     san_board.push(pv_move)
                 except (ValueError, AssertionError):
                     break
@@ -212,7 +232,7 @@ def _web_analysis_pv(info: InfoDict, analysed_fen: str, move: chess.Move | None)
         pv_to_send = [pv_move.uci() for pv_move in pv_moves if pv_move and pv_move != chess.Move.null()]
     if not pv_to_send and move and move != chess.Move.null():
         try:
-            pv_to_send = [chess.Board(analysed_fen).san(move)]
+            pv_to_send = [localize_web_san(chess.Board(analysed_fen).san(move), language)]
         except Exception:
             pv_to_send = [move.uci()]
     return pv_to_send
@@ -223,6 +243,7 @@ def web_analysis_payload(
     analysed_fen: str,
     source: str,
     suppress_engine_line: bool = False,
+    language: str = "en",
 ) -> dict | None:
     """Build up to three web lines while retaining PV1 compatibility fields."""
     limited_info = (info_list or [])[:WEB_ANALYSIS_MULTIPV]
@@ -245,7 +266,7 @@ def web_analysis_payload(
                 "depth": info.get("depth"),
                 "score": score,
                 "mate": mate,
-                "pv": _web_analysis_pv(info, analysed_fen, move),
+                "pv": _web_analysis_pv(info, analysed_fen, move, language),
             }
         )
     if not lines:
@@ -4903,6 +4924,7 @@ async def main() -> None:
                 analysed_fen,
                 source,
                 suppress_engine_line=suppress_engine_line,
+                language=getattr(self.state.dgttranslate, "language", "en"),
             )
             if analysis_payload is None:
                 logger.debug("skip web analysis for %s: no complete score/mate lines yet", source)

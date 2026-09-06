@@ -19,6 +19,7 @@ from picochess import (
     decide_game_end_analysis_stop,
     decide_tutor_analysis,
     loaded_pgn_interaction_mode,
+    localize_web_san,
     mame_requires_fresh_fen_root,
     pgn_with_board_as_fresh_root,
     remote_move_matches_current_position,
@@ -97,6 +98,40 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
                     previous_source_selection(*values),
                     decide_analysis_source(AnalysisSourceContext(*values)),
                 )
+
+    def test_web_san_uses_interface_piece_letters(self):
+        expected_piece_letters = {
+            "en": "KQRBN",
+            "de": "KDTLS",
+            "nl": "KDTLP",
+            "fr": "RDTFC",
+            "es": "RDTAC",
+            "it": "RDTAC",
+        }
+        for language, expected in expected_piece_letters.items():
+            with self.subTest(language=language):
+                self.assertEqual(expected, localize_web_san("KQRBN", language))
+
+        self.assertEqual("Dxd5+", localize_web_san("Qxd5+", "nl"))
+        self.assertEqual("e8=P+", localize_web_san("e8=N+", "nl"))
+
+    def test_web_san_keeps_english_and_unknown_languages_unchanged(self):
+        self.assertEqual("Nc6", localize_web_san("Nc6", "en"))
+        self.assertEqual("Nc6", localize_web_san("Nc6", "unknown"))
+
+    def test_web_analysis_payload_localizes_each_pv_move(self):
+        board = chess.Board()
+        info_list = [
+            {
+                "depth": 10,
+                "score": chess.engine.PovScore(chess.engine.Cp(25), chess.WHITE),
+                "pv": [chess.Move.from_uci("g1f3"), chess.Move.from_uci("g8f6")],
+            }
+        ]
+
+        payload = web_analysis_payload(info_list, board.fen(), "engine", language="nl")
+
+        self.assertEqual(["Pf3", "Pf6"], payload["pv"])
 
     def test_new_game_clears_preserved_mame_history(self):
         source = (Path(__file__).parents[1] / "picochess.py").read_text(encoding="utf-8")
