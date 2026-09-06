@@ -51,8 +51,18 @@ class TestDgtBoardShutdown(unittest.IsolatedAsyncioTestCase):
         board = DgtBoard("/dev/test", False, False, False, loop)
         board.serial = Mock()
         board.serial.read.side_effect = TypeError("descriptor already closed")
+        board.stop_requested.set()
 
         self.assertEqual(board._read_serial(), b"")
+
+    async def test_read_propagates_type_error_outside_shutdown(self):
+        loop = asyncio.get_running_loop()
+        board = DgtBoard("/dev/test", False, False, False, loop)
+        board.serial = Mock()
+        board.serial.read.side_effect = TypeError("unexpected read error")
+
+        with self.assertRaisesRegex(TypeError, "unexpected read error"):
+            board._read_serial()
 
     async def test_stop_tolerates_reader_failing_during_serial_close(self):
         loop = asyncio.get_running_loop()
@@ -66,3 +76,30 @@ class TestDgtBoardShutdown(unittest.IsolatedAsyncioTestCase):
         await board.stop()
 
         self.assertTrue(board.incoming_board_task.done())
+
+    async def test_setup_does_not_open_connection_during_shutdown(self):
+        loop = asyncio.get_running_loop()
+        board = DgtBoard("/dev/test", False, False, False, loop)
+        board._open_serial = Mock(return_value=True)
+        board.stop_requested.set()
+
+        self.assertFalse(board._setup_serial_port())
+        board._open_serial.assert_not_called()
+
+    async def test_stop_closes_connection_reopened_by_reader(self):
+        loop = asyncio.get_running_loop()
+        board = DgtBoard("/dev/test", False, False, False, loop)
+        original_serial = Mock()
+        reopened_serial = Mock()
+        board.serial = original_serial
+
+        async def reader_reopened_connection():
+            board.serial = reopened_serial
+
+        board.incoming_board_task = asyncio.create_task(reader_reopened_connection())
+
+        await board.stop()
+
+        original_serial.close.assert_called_once_with()
+        reopened_serial.close.assert_called_once_with()
+        self.assertIsNone(board.serial)

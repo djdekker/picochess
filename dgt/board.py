@@ -539,8 +539,11 @@ class DgtBoard(EBoard):
     def _read_serial(self, bytes_toread=1):
         try:
             return self.serial.read(bytes_toread)
-        except (SerialException, TypeError):
+        except SerialException:
             pass
+        except TypeError:
+            if not self.stop_requested.is_set():
+                raise
         except AttributeError:  # serial is None (race condition)
             pass
         return b""
@@ -908,16 +911,23 @@ class DgtBoard(EBoard):
 
     def _setup_serial_port(self):
         def _success(device: str):
+            if self.stop_requested.is_set():
+                self._close_serial_for_shutdown()
+                return False
             self.device = device
             logger.debug("(ser) board connected to %s", self.device)
             return True
 
+        if self.stop_requested.is_set():
+            return False
         if self.watchdog_timer.is_running():
             logger.debug("watchdog timer is stopped now")
             self.watchdog_timer.stop()
         if self.serial:
             return True
         with self.lock:
+            if self.stop_requested.is_set():
+                return False
             if self.given_device:
                 if self._open_serial(self.given_device):
                     return _success(self.given_device)
@@ -1136,12 +1146,8 @@ class DgtBoard(EBoard):
         self.stop_requested.clear()
         self.incoming_board_task = self.loop.create_task(asyncio.to_thread(self._process_incoming_board_forever))
 
-    async def stop(self):
-        """Stop the serial board reader and wait for its worker thread to finish."""
-        self.stop_requested.set()
-        self.watchdog_timer.stop()
-        self.version_timer.stop()
-        self.stop_field_timer()
+    def _close_serial_for_shutdown(self):
+        """Detach and close the current serial handle during shutdown."""
         serial = self.serial
         self.serial = None
         if serial is not None:
@@ -1149,6 +1155,14 @@ class DgtBoard(EBoard):
                 serial.close()
             except (OSError, SerialException, TypeError):
                 logger.debug("error while closing serial board connection", exc_info=True)
+
+    async def stop(self):
+        """Stop the serial board reader and wait for its worker thread to finish."""
+        self.stop_requested.set()
+        self.watchdog_timer.stop()
+        self.version_timer.stop()
+        self.stop_field_timer()
+        self._close_serial_for_shutdown()
         if self.incoming_board_task is not None:
             try:
                 await self.incoming_board_task
@@ -1156,3 +1170,6 @@ class DgtBoard(EBoard):
                 pass
             except (OSError, SerialException, TypeError):
                 logger.debug("serial board reader stopped after connection closed", exc_info=True)
+        # A connection attempt may have completed after the first close but
+        # before the reader observed stop_requested.
+        self._close_serial_for_shutdown()

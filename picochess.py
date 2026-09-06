@@ -1823,6 +1823,7 @@ async def main() -> None:
             self.shared.setdefault("system_info", {})["game_started"] = self.state.game_started
             self.non_main_tasks = non_main_tasks
             self.event_tasks: set[asyncio.Task] = set()
+            self.shutdown_task: asyncio.Task | None = None
             self.shutdown_requested = shutdown_requested
             self.shutdown_complete = shutdown_complete
             self.update_status = None
@@ -8220,7 +8221,7 @@ async def main() -> None:
                 return
             self.shutdown_requested.set()
             logger.debug("Received kill signal, shutting down")
-            asyncio.create_task(self._exit_async())
+            self.shutdown_task = asyncio.create_task(self._exit_async())
 
         async def _exit_async(self):
             """Async function to handle systemctl stop signal"""
