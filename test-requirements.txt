@@ -3,4 +3,6 @@ mypy
 mock
 pylama
 pyflakes
+# Pylama still imports pkg_resources; keep that legacy API available until the
+# lint tooling is upgraded.
 setuptools<81
