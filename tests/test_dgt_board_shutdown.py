@@ -55,14 +55,13 @@ class TestDgtBoardShutdown(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(board._read_serial(), b"")
 
-    async def test_read_propagates_type_error_outside_shutdown(self):
+    async def test_read_tolerates_transient_type_error_during_reconnect(self):
         loop = asyncio.get_running_loop()
         board = DgtBoard("/dev/test", False, False, False, loop)
         board.serial = Mock()
-        board.serial.read.side_effect = TypeError("unexpected read error")
+        board.serial.read.side_effect = TypeError("descriptor changed during reconnect")
 
-        with self.assertRaisesRegex(TypeError, "unexpected read error"):
-            board._read_serial()
+        self.assertEqual(board._read_serial(), b"")
 
     async def test_stop_tolerates_reader_failing_during_serial_close(self):
         loop = asyncio.get_running_loop()

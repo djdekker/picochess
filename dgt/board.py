@@ -539,11 +539,8 @@ class DgtBoard(EBoard):
     def _read_serial(self, bytes_toread=1):
         try:
             return self.serial.read(bytes_toread)
-        except SerialException:
+        except (SerialException, TypeError):
             pass
-        except TypeError:
-            if not self.stop_requested.is_set():
-                raise
         except AttributeError:  # serial is None (race condition)
             pass
         return b""
