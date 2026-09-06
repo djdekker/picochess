@@ -10,9 +10,12 @@ from dgt.util import Mode
 from picochess import (
     AnalysisCycleAction,
     AnalysisCycleContext,
+    AnalysisSourceAction,
+    AnalysisSourceContext,
     GameEndAnalysisContext,
     TutorAnalysisContext,
     decide_analysis_cycle_action,
+    decide_analysis_source,
     decide_game_end_analysis_stop,
     decide_tutor_analysis,
     loaded_pgn_interaction_mode,
@@ -58,6 +61,41 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
                             game_end_analysis_stopped=game_end_stopped,
                         )
                     ),
+                )
+
+    def test_analysis_source_matrix_preserves_existing_branch_precedence(self):
+        def previous_source_selection(
+            tutor_is_primary,
+            engine_plays,
+            pgn_mode,
+            is_user_turn,
+            engine_thinking,
+            tutor_analyser_available,
+        ):
+            if tutor_is_primary:
+                return AnalysisSourceAction.TUTOR_PRIMARY
+            if not engine_plays and not pgn_mode:
+                return AnalysisSourceAction.ENGINE_NON_PLAYING
+            if not pgn_mode:
+                if not is_user_turn and engine_thinking:
+                    return AnalysisSourceAction.ENGINE_THINKING
+                if tutor_analyser_available:
+                    return AnalysisSourceAction.TUTOR_WEB_ONLY
+                return AnalysisSourceAction.ENGINE_CURRENT
+            return AnalysisSourceAction.NONE
+
+        for values in product((False, True), repeat=6):
+            with self.subTest(
+                tutor_is_primary=values[0],
+                engine_plays=values[1],
+                pgn_mode=values[2],
+                is_user_turn=values[3],
+                engine_thinking=values[4],
+                tutor_analyser_available=values[5],
+            ):
+                self.assertEqual(
+                    previous_source_selection(*values),
+                    decide_analysis_source(AnalysisSourceContext(*values)),
                 )
 
     def test_new_game_clears_preserved_mame_history(self):

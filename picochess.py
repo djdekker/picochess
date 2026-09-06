@@ -358,6 +358,44 @@ def decide_analysis_cycle_action(context: AnalysisCycleContext) -> AnalysisCycle
     return AnalysisCycleAction.CONTINUE
 
 
+class AnalysisSourceAction(Enum):
+    """Select which cached analyser output an analysis cycle should read."""
+
+    TUTOR_PRIMARY = "tutor_primary"
+    ENGINE_NON_PLAYING = "engine_non_playing"
+    ENGINE_THINKING = "engine_thinking"
+    TUTOR_WEB_ONLY = "tutor_web_only"
+    ENGINE_CURRENT = "engine_current"
+    NONE = "none"
+
+
+@dataclass(frozen=True)
+class AnalysisSourceContext:
+    """Inputs for selecting an analysis source without performing side effects."""
+
+    tutor_is_primary: bool
+    engine_plays: bool
+    pgn_mode: bool
+    is_user_turn: bool
+    engine_thinking: bool
+    tutor_analyser_available: bool
+
+
+def decide_analysis_source(context: AnalysisSourceContext) -> AnalysisSourceAction:
+    """Mirror the existing analysis-source precedence used by ``analyse()``."""
+    if context.tutor_is_primary:
+        return AnalysisSourceAction.TUTOR_PRIMARY
+    if not context.engine_plays and not context.pgn_mode:
+        return AnalysisSourceAction.ENGINE_NON_PLAYING
+    if context.pgn_mode:
+        return AnalysisSourceAction.NONE
+    if not context.is_user_turn and context.engine_thinking:
+        return AnalysisSourceAction.ENGINE_THINKING
+    if context.tutor_analyser_available:
+        return AnalysisSourceAction.TUTOR_WEB_ONLY
+    return AnalysisSourceAction.ENGINE_CURRENT
+
+
 def should_stop_analysis_after_game_end(
     interaction_mode: Mode, game_over: bool, game_declared: bool, game_ending: str | None
 ) -> bool:
