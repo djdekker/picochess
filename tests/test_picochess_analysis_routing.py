@@ -55,21 +55,35 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
         self.assertIs(info_list, result)
         best_seen_depth.is_better.assert_called_once_with(info_list[0], game.fen(), game)
 
-    def test_depth_gate_suppresses_rejected_and_empty_analysis(self):
+    def test_depth_gate_suppresses_rejected_analysis(self):
         game = chess.Board()
-        for info_list, accepted in (([{"depth": 12}], False), (None, True), ([], True)):
-            with self.subTest(info_list=info_list, accepted=accepted):
+        info_list = [{"depth": 12}]
+        best_seen_depth = Mock()
+        best_seen_depth.is_better.return_value = False
+
+        result = depth_gated_analysis_info(
+            best_seen_depth, info_list, game.fen(), game
+        )
+
+        self.assertIsNone(result)
+        best_seen_depth.is_better.assert_called_once_with(
+            info_list[0], game.fen(), game
+        )
+
+    def test_depth_gate_preserves_accepted_empty_analysis(self):
+        game = chess.Board()
+        for info_list in (None, []):
+            with self.subTest(info_list=info_list):
                 best_seen_depth = Mock()
-                best_seen_depth.is_better.return_value = accepted
+                best_seen_depth.is_better.return_value = True
 
                 result = depth_gated_analysis_info(
                     best_seen_depth, info_list, game.fen(), game
                 )
 
-                self.assertIsNone(result)
-                expected_candidate = info_list[0] if info_list else None
+                self.assertIs(info_list, result)
                 best_seen_depth.is_better.assert_called_once_with(
-                    expected_candidate, game.fen(), game
+                    None, game.fen(), game
                 )
 
     def test_position_tagged_analysis_events_reject_stale_positions(self):
