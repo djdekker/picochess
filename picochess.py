@@ -33,6 +33,7 @@ from logging.handlers import RotatingFileHandler
 import math
 import traceback
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, List, Optional, Set, Tuple
 import asyncio
 from pathlib import Path
@@ -330,6 +331,31 @@ def decide_game_end_analysis_stop(context: GameEndAnalysisContext) -> bool:
         or bool(context.game_declared)
         or (context.game_ending or "*") != "*"
     )
+
+
+class AnalysisCycleAction(Enum):
+    """Control action taken before an analysis cycle reads engine output."""
+
+    CONTINUE = "continue"
+    RECONCILE_CHECKPOINT_RESTORE = "reconcile_checkpoint_restore"
+    STOP_AFTER_GAME_END = "stop_after_game_end"
+
+
+@dataclass(frozen=True)
+class AnalysisCycleContext:
+    """Inputs for the early-exit policy of an analysis cycle."""
+
+    checkpoint_restore_pending: bool
+    game_end_analysis_stopped: bool
+
+
+def decide_analysis_cycle_action(context: AnalysisCycleContext) -> AnalysisCycleAction:
+    """Select an early analysis action while preserving checkpoint precedence."""
+    if context.checkpoint_restore_pending:
+        return AnalysisCycleAction.RECONCILE_CHECKPOINT_RESTORE
+    if context.game_end_analysis_stopped:
+        return AnalysisCycleAction.STOP_AFTER_GAME_END
+    return AnalysisCycleAction.CONTINUE
 
 
 def should_stop_analysis_after_game_end(
@@ -4643,7 +4669,16 @@ async def main() -> None:
         async def analyse(self, triggered_by_timer: bool = False, allow_autoplay: bool = True) -> InfoDict | None:
             """analyse, observe etc depening on mode - create analysis info
             this is executed periodically in the background_analyse_timer task"""
-            if self.state.position_checkpoint_restore_pending:
+            checkpoint_restore_pending = self.state.position_checkpoint_restore_pending
+            cycle_action = decide_analysis_cycle_action(
+                AnalysisCycleContext(
+                    checkpoint_restore_pending=checkpoint_restore_pending,
+                    game_end_analysis_stopped=(
+                        False if checkpoint_restore_pending else self.playing_game_analysis_stopped()
+                    ),
+                )
+            )
+            if cycle_action == AnalysisCycleAction.RECONCILE_CHECKPOINT_RESTORE:
                 # The logical board already contains the checkpoint, but the
                 # physical board does not yet match it.  Do not display a
                 # cached evaluation for a position the user has not restored.
@@ -4657,7 +4692,7 @@ async def main() -> None:
             analysed_fen = ""  # analysis is only valid for this fen
             analysed_fen_for_web_engine = ""
             analysed_fen_for_web_tutor = ""
-            if self.playing_game_analysis_stopped():
+            if cycle_action == AnalysisCycleAction.STOP_AFTER_GAME_END:
                 await self._start_or_stop_analysis_as_needed()
                 if self.state.picotutor is not None:
                     await self.state.picotutor.set_analysis_enabled(False)

@@ -8,8 +8,11 @@ import chess
 from dgt.api import Message
 from dgt.util import Mode
 from picochess import (
+    AnalysisCycleAction,
+    AnalysisCycleContext,
     GameEndAnalysisContext,
     TutorAnalysisContext,
+    decide_analysis_cycle_action,
     decide_game_end_analysis_stop,
     decide_tutor_analysis,
     loaded_pgn_interaction_mode,
@@ -35,6 +38,28 @@ from picochess import (
 
 
 class TestPicochessAnalysisRouting(unittest.TestCase):
+    def test_analysis_cycle_action_preserves_early_exit_side_effect_boundaries(self):
+        cases = (
+            (False, False, AnalysisCycleAction.CONTINUE),
+            (False, True, AnalysisCycleAction.STOP_AFTER_GAME_END),
+            (True, False, AnalysisCycleAction.RECONCILE_CHECKPOINT_RESTORE),
+            (True, True, AnalysisCycleAction.RECONCILE_CHECKPOINT_RESTORE),
+        )
+        for checkpoint_pending, game_end_stopped, expected in cases:
+            with self.subTest(
+                checkpoint_pending=checkpoint_pending,
+                game_end_stopped=game_end_stopped,
+            ):
+                self.assertEqual(
+                    expected,
+                    decide_analysis_cycle_action(
+                        AnalysisCycleContext(
+                            checkpoint_restore_pending=checkpoint_pending,
+                            game_end_analysis_stopped=game_end_stopped,
+                        )
+                    ),
+                )
+
     def test_new_game_clears_preserved_mame_history(self):
         source = (Path(__file__).parents[1] / "picochess.py").read_text(encoding="utf-8")
         new_game_handler = source.split("elif isinstance(event, Event.NEW_GAME):", 1)[1]
