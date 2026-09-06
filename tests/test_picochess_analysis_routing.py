@@ -8,7 +8,9 @@ import chess
 from dgt.api import Message
 from dgt.util import Mode
 from picochess import (
+    GameEndAnalysisContext,
     TutorAnalysisContext,
+    decide_game_end_analysis_stop,
     decide_tutor_analysis,
     loaded_pgn_interaction_mode,
     mame_requires_fresh_fen_root,
@@ -617,6 +619,17 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
                         game_over=game_over,
                         game_declared=game_declared,
                         game_ending=game_ending,
+                    ),
+                )
+                self.assertEqual(
+                    expected,
+                    decide_game_end_analysis_stop(
+                        GameEndAnalysisContext(
+                            interaction_mode=mode,
+                            game_over=game_over,
+                            game_declared=game_declared,
+                            game_ending=game_ending,
+                        )
                     ),
                 )
 

@@ -311,13 +311,39 @@ def should_reject_user_move_after_game_end(
     return bool(game_declared) or (game_ending or "*") != "*"
 
 
+@dataclass(frozen=True)
+class GameEndAnalysisContext:
+    """Inputs that determine whether a completed game stops deep analysis."""
+
+    interaction_mode: Mode
+    game_over: bool
+    game_declared: bool
+    game_ending: str | None
+
+
+def decide_game_end_analysis_stop(context: GameEndAnalysisContext) -> bool:
+    """Return whether this game-end state must stop playing-mode analysis."""
+    if context.interaction_mode not in (Mode.NORMAL, Mode.BRAIN, Mode.TRAINING):
+        return False
+    return (
+        bool(context.game_over)
+        or bool(context.game_declared)
+        or (context.game_ending or "*") != "*"
+    )
+
+
 def should_stop_analysis_after_game_end(
     interaction_mode: Mode, game_over: bool, game_declared: bool, game_ending: str | None
 ) -> bool:
-    """Return true when playing-mode deep analysis should stop after game end."""
-    if interaction_mode not in (Mode.NORMAL, Mode.BRAIN, Mode.TRAINING):
-        return False
-    return bool(game_over) or bool(game_declared) or (game_ending or "*") != "*"
+    """Compatibility wrapper for the explicit game-end analysis context."""
+    return decide_game_end_analysis_stop(
+        GameEndAnalysisContext(
+            interaction_mode=interaction_mode,
+            game_over=game_over,
+            game_declared=game_declared,
+            game_ending=game_ending,
+        )
+    )
 
 
 def remote_move_matches_current_position(move: chess.Move, posted_fen: str | None, board: chess.Board) -> bool:
