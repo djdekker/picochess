@@ -32,6 +32,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import math
 import traceback
+from dataclasses import dataclass
 from typing import Any, List, Optional, Set, Tuple
 import asyncio
 from pathlib import Path
@@ -1420,6 +1421,28 @@ def tutor_analysis_allowed_in_mode(interaction_mode: Mode) -> bool:
     return interaction_mode != Mode.PONDER
 
 
+@dataclass(frozen=True)
+class TutorAnalysisContext:
+    """Inputs that determine whether Tutor replaces selected-engine analysis."""
+
+    interaction_mode: Mode
+    pgn_mode: bool
+    engine_should_skip_analyser: bool
+    engine_is_playing: bool
+    is_user_turn: bool
+
+
+def decide_tutor_analysis(context: TutorAnalysisContext) -> bool:
+    """Return whether Tutor should own deep analysis for this cycle."""
+    if not tutor_analysis_allowed_in_mode(context.interaction_mode):
+        return False
+    if context.pgn_mode or context.engine_should_skip_analyser:
+        return True
+    # While an engine is playing, its PlayingContinuousAnalysis owns the engine
+    # turn. On the user turn PicoTutor replaces selected-engine analysis.
+    return not context.engine_is_playing or context.is_user_turn
+
+
 def should_block_takeback(
     take_back_locked: bool,
     online_mode: bool,
@@ -1445,16 +1468,16 @@ def should_use_tutor_analysis(
     engine_move_was_book: bool,
     is_user_turn: bool,
 ) -> bool:
-    """Return True when tutor analysis should replace engine analysis."""
-    if not tutor_analysis_allowed_in_mode(interaction_mode):
-        return False
-    if pgn_mode or engine_should_skip_analyser:
-        return True
-    # While an engine is playing, its PlayingContinuousAnalysis owns the engine
-    # turn.  On the user turn PicoTutor replaces selected-engine
-    # ContinuousAnalysis, preserving the final playing-search snapshot while
-    # avoiding a second deep analyser competing for Pi CPU.
-    return not engine_is_playing or is_user_turn
+    """Compatibility wrapper for the explicit Tutor analysis context."""
+    return decide_tutor_analysis(
+        TutorAnalysisContext(
+            interaction_mode=interaction_mode,
+            pgn_mode=pgn_mode,
+            engine_should_skip_analyser=engine_should_skip_analyser,
+            engine_is_playing=engine_is_playing,
+            is_user_turn=is_user_turn,
+        )
+    )
 
 
 async def rollback_picotutor_for_alternative(picotutor, game: chess.Board, resync) -> bool:

@@ -8,6 +8,8 @@ import chess
 from dgt.api import Message
 from dgt.util import Mode
 from picochess import (
+    TutorAnalysisContext,
+    decide_tutor_analysis,
     loaded_pgn_interaction_mode,
     mame_requires_fresh_fen_root,
     pgn_with_board_as_fresh_root,
@@ -443,6 +445,18 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
                         engine_is_playing=engine_plays,
                         engine_move_was_book=book_move,
                         is_user_turn=user_turn,
+                    ),
+                )
+                self.assertEqual(
+                    expected,
+                    decide_tutor_analysis(
+                        TutorAnalysisContext(
+                            interaction_mode=mode,
+                            pgn_mode=pgn_mode,
+                            engine_should_skip_analyser=skip_engine,
+                            engine_is_playing=engine_plays,
+                            is_user_turn=user_turn,
+                        )
                     ),
                 )
 
