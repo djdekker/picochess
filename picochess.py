@@ -574,6 +574,19 @@ class BestSeenDepth:
                 self.ponder_move = ponder_move if ponder_move else chess.Move.null()
 
 
+def depth_gated_analysis_info(
+    best_seen_depth: BestSeenDepth,
+    info_list: list[InfoDict] | None,
+    analysed_fen: str,
+    game: chess.Board,
+) -> list[InfoDict] | None:
+    """Return clock analysis only when it passes the existing depth gate."""
+    info_candidate = info_list[0] if info_list else None
+    if best_seen_depth.is_better(info_candidate, analysed_fen, game):
+        return info_list
+    return None
+
+
 class PicochessState:
     """Class to keep track of state in Picochess."""
 
@@ -4786,9 +4799,9 @@ async def main() -> None:
                 analysed_fen_for_web_tutor = analysed_fen
                 if self.state.picotutor.get_board().fen() != self.state.game.fen():
                     logger.warning("picotutor board out of sync with game")
-                info_candidate = info_list[0] if info_list else None
-                if not self.state.best_sent_depth.is_better(info_candidate, analysed_fen, self.state.game):
-                    info_list = None  # optimised - prevent this info from being sent
+                info_list = depth_gated_analysis_info(
+                    self.state.best_sent_depth, info_list, analysed_fen, self.state.game
+                )
             elif source_action == AnalysisSourceAction.ENGINE_NON_PLAYING:
                 # we need to analyse both sides without tutor - use engine analyser
                 result = await self.engine.get_analysis(self.state.game)
@@ -4797,9 +4810,9 @@ async def main() -> None:
                 analysed_fen = result.get("fen", "")
                 info_for_web_engine = info_list
                 analysed_fen_for_web_engine = analysed_fen
-                info_candidate = info_list[0] if info_list else None
-                if not self.state.best_sent_depth.is_better(info_candidate, analysed_fen, self.state.game):
-                    info_list = None  # optimised - prevent this info from being sent
+                info_list = depth_gated_analysis_info(
+                    self.state.best_sent_depth, info_list, analysed_fen, self.state.game
+                )
                 await self._start_or_stop_analysis_as_needed()
             else:
                 # Issue #109 and #49 before that - how to get engine thinking
@@ -4827,11 +4840,9 @@ async def main() -> None:
                     analysed_fen = result.get("fen", "")
                     info_for_web_engine = info_list
                     analysed_fen_for_web_engine = analysed_fen
-                    info_candidate = info_list[0] if info_list else None
-                    if not self.state.best_sent_depth.is_better(
-                        info_candidate, analysed_fen, self.state.game
-                    ):
-                        info_list = None  # prevent re-sending analysis at the same depth
+                    info_list = depth_gated_analysis_info(
+                        self.state.best_sent_depth, info_list, analysed_fen, self.state.game
+                    )
                 await self._start_or_stop_analysis_as_needed()
             if info_for_web_engine:
                 await self.send_web_analysis(

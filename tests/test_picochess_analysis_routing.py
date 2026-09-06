@@ -19,6 +19,7 @@ from picochess import (
     decide_analysis_source,
     decide_game_end_analysis_stop,
     decide_tutor_analysis,
+    depth_gated_analysis_info,
     loaded_pgn_interaction_mode,
     localize_web_san,
     mame_requires_fresh_fen_root,
@@ -43,6 +44,34 @@ from picochess import (
 
 
 class TestPicochessAnalysisRouting(unittest.TestCase):
+    def test_depth_gate_passes_first_line_and_preserves_the_original_list(self):
+        best_seen_depth = Mock()
+        best_seen_depth.is_better.return_value = True
+        game = chess.Board()
+        info_list = [{"depth": 12}, {"depth": 11}]
+
+        result = depth_gated_analysis_info(best_seen_depth, info_list, game.fen(), game)
+
+        self.assertIs(info_list, result)
+        best_seen_depth.is_better.assert_called_once_with(info_list[0], game.fen(), game)
+
+    def test_depth_gate_suppresses_rejected_and_empty_analysis(self):
+        game = chess.Board()
+        for info_list, accepted in (([{"depth": 12}], False), (None, True), ([], True)):
+            with self.subTest(info_list=info_list, accepted=accepted):
+                best_seen_depth = Mock()
+                best_seen_depth.is_better.return_value = accepted
+
+                result = depth_gated_analysis_info(
+                    best_seen_depth, info_list, game.fen(), game
+                )
+
+                self.assertIsNone(result)
+                expected_candidate = info_list[0] if info_list else None
+                best_seen_depth.is_better.assert_called_once_with(
+                    expected_candidate, game.fen(), game
+                )
+
     def test_position_tagged_analysis_events_reject_stale_positions(self):
         self.assertTrue(analysis_event_matches_position("current", "current"))
         self.assertFalse(analysis_event_matches_position("previous", "current"))
