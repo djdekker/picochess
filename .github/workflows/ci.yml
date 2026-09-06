@@ -18,7 +18,6 @@ jobs:
       run: tox -e lint
         
   mypy:
-    if: false  # disable the job
     runs-on: ubuntu-22.04
    
     steps:
