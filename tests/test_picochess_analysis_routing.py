@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -412,6 +413,39 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
             )
         )
 
+    def test_tutor_analysis_routing_matrix(self):
+        """Lock every current input combination before routing is reorganized."""
+        for mode, pgn_mode, skip_engine, engine_plays, book_move, user_turn in product(
+            Mode.items(),
+            (False, True),
+            (False, True),
+            (False, True),
+            (False, True),
+            (False, True),
+        ):
+            expected = mode != Mode.PONDER and (
+                pgn_mode or skip_engine or not engine_plays or user_turn
+            )
+            with self.subTest(
+                mode=mode,
+                pgn_mode=pgn_mode,
+                skip_engine=skip_engine,
+                engine_plays=engine_plays,
+                book_move=book_move,
+                user_turn=user_turn,
+            ):
+                self.assertEqual(
+                    expected,
+                    should_use_tutor_analysis(
+                        interaction_mode=mode,
+                        pgn_mode=pgn_mode,
+                        engine_should_skip_analyser=skip_engine,
+                        engine_is_playing=engine_plays,
+                        engine_move_was_book=book_move,
+                        is_user_turn=user_turn,
+                    ),
+                )
+
     def test_ponder_always_allows_takeback(self):
         for guard in (
             {"take_back_locked": True},
@@ -544,6 +578,33 @@ class TestPicochessAnalysisRouting(unittest.TestCase):
                 game_ending="*",
             )
         )
+
+    def test_game_end_analysis_stop_matrix(self):
+        """Keep playing and review modes distinct for every game-end signal."""
+        playing_modes = (Mode.NORMAL, Mode.BRAIN, Mode.TRAINING)
+        for mode, game_over, game_declared, game_ending in product(
+            Mode.items(),
+            (False, True),
+            (False, True),
+            (None, "*", "1-0"),
+        ):
+            has_ended = game_over or game_declared or game_ending == "1-0"
+            expected = mode in playing_modes and has_ended
+            with self.subTest(
+                mode=mode,
+                game_over=game_over,
+                game_declared=game_declared,
+                game_ending=game_ending,
+            ):
+                self.assertEqual(
+                    expected,
+                    should_stop_analysis_after_game_end(
+                        interaction_mode=mode,
+                        game_over=game_over,
+                        game_declared=game_declared,
+                        game_ending=game_ending,
+                    ),
+                )
 
     def test_remote_move_matches_current_live_position(self):
         board = chess.Board()
