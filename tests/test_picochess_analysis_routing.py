@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import chess
 
-from dgt.api import Message
+from dgt.api import Event, Message
 from dgt.util import Mode
 from picochess import (
     AnalysisCycleAction,
@@ -14,6 +14,7 @@ from picochess import (
     AnalysisSourceContext,
     GameEndAnalysisContext,
     TutorAnalysisContext,
+    analysis_event_matches_position,
     decide_analysis_cycle_action,
     decide_analysis_source,
     decide_game_end_analysis_stop,
@@ -42,6 +43,22 @@ from picochess import (
 
 
 class TestPicochessAnalysisRouting(unittest.TestCase):
+    def test_position_tagged_analysis_events_reject_stale_positions(self):
+        self.assertTrue(analysis_event_matches_position("current", "current"))
+        self.assertFalse(analysis_event_matches_position("previous", "current"))
+
+    def test_legacy_untagged_analysis_events_remain_compatible(self):
+        legacy_events = (
+            Event.NEW_DEPTH(depth=12),
+            Event.NEW_PV(pv=[chess.Move.from_uci("e2e4")]),
+            Event.NEW_SCORE(score=25, mate=0),
+        )
+
+        for event in legacy_events:
+            with self.subTest(event=event):
+                self.assertFalse(hasattr(event, "fen"))
+                self.assertTrue(analysis_event_matches_position(getattr(event, "fen", None), "current"))
+
     def test_analysis_cycle_action_preserves_early_exit_side_effect_boundaries(self):
         cases = (
             (False, False, AnalysisCycleAction.CONTINUE),

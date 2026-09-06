@@ -206,6 +206,15 @@ def localize_web_san(san: str, language: str) -> str:
     return san.translate(translation) if translation is not None else san
 
 
+def analysis_event_matches_position(event_fen: str | None, current_fen: str) -> bool:
+    """Accept position-tagged analysis only for its source position.
+
+    Untagged events remain valid for compatibility with external or older
+    producers using the public Event classes.
+    """
+    return event_fen is None or event_fen == current_fen
+
+
 def _web_analysis_pv(
     info: InfoDict,
     analysed_fen: str,
@@ -4889,7 +4898,7 @@ async def main() -> None:
                     cache_ponder = ponder_move
                 self.state.best_sent_depth.set_best(info, analysed_fen, self.state.game, cache_ponder)
                 # send depth before score as score is assembling depth in receiver end
-                await Observable.fire(Event.NEW_DEPTH(depth=depth))
+                await Observable.fire(Event.NEW_DEPTH(depth=depth, fen=analysed_fen))
             if send_pv:
                 pv_move_to_send = ponder_move if ponder_move and ponder_move != chess.Move.null() else move
                 pv_moves = list(info.get("pv") or [])
@@ -4901,9 +4910,9 @@ async def main() -> None:
                     pv_to_send = [pv_move_to_send] if pv_move_to_send != chess.Move.null() else []
                 if pv_to_send:
                     self.state.pb_move = pv_to_send[0]  # backward compatibility
-                    await Observable.fire(Event.NEW_PV(pv=pv_to_send))
+                    await Observable.fire(Event.NEW_PV(pv=pv_to_send, fen=analysed_fen))
             if score is not None:
-                await Observable.fire(Event.NEW_SCORE(score=score, mate=mate))
+                await Observable.fire(Event.NEW_SCORE(score=score, mate=mate, fen=analysed_fen))
 
         async def send_web_analysis(
             self,
@@ -5953,6 +5962,17 @@ async def main() -> None:
                 logger.info("ignoring mode change until the physical checkpoint restore is complete")
                 await DisplayMsg.show(Message.WRONG_FEN())
                 return
+            if isinstance(event, (Event.NEW_DEPTH, Event.NEW_PV, Event.NEW_SCORE)):
+                event_fen = getattr(event, "fen", None)
+                current_fen = self.state.get_fen()
+                if not analysis_event_matches_position(event_fen, current_fen):
+                    logger.debug(
+                        "ignoring delayed analysis event %s for old fen: %s != %s",
+                        event,
+                        event_fen,
+                        current_fen,
+                    )
+                    return
             if isinstance(event, Event.FEN):
                 await self.process_fen(event.fen, self.state)
 

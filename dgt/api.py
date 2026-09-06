@@ -393,9 +393,11 @@ class Event:
     KEYBOARD_FEN = ClassFactory(EventApi.KEYBOARD_FEN, ["fen"])
     # Engine events
     BEST_MOVE = ClassFactory(EventApi.BEST_MOVE, ["move", "ponder", "inbook"])
-    NEW_PV = ClassFactory(EventApi.NEW_PV, ["pv"])
-    NEW_SCORE = ClassFactory(EventApi.NEW_SCORE, ["score", "mate"])
-    NEW_DEPTH = ClassFactory(EventApi.NEW_DEPTH, ["depth"])
+    # ``fen`` is optional for backward compatibility with older producers.
+    # Picochess supplies it so delayed analysis events can be rejected safely.
+    NEW_PV = ClassFactory(EventApi.NEW_PV, ["pv", "fen"])
+    NEW_SCORE = ClassFactory(EventApi.NEW_SCORE, ["score", "mate", "fen"])
+    NEW_DEPTH = ClassFactory(EventApi.NEW_DEPTH, ["depth", "fen"])
     START_SEARCH = ClassFactory(EventApi.START_SEARCH, [])
     STOP_SEARCH = ClassFactory(EventApi.STOP_SEARCH, [])
     # Timecontrol events
