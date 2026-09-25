@@ -11,7 +11,7 @@ jobs:
     - name: Set up Python 3.11
       uses: actions/setup-python@v2
       with:
-        python-version: 3.11
+        python-version: 3.13
     - name: Install tox
       run: pip install tox
     - name: Run linting with tox
@@ -26,7 +26,7 @@ jobs:
     - name: Set up Python 3.11
       uses: actions/setup-python@v2
       with:
-        python-version: 3.11
+        python-version: 3.13
     - name: Install tox
       run: pip install tox
     - name: Run type checks with tox
@@ -40,7 +40,7 @@ jobs:
     - name: Set up Python 3.11
       uses: actions/setup-python@v2
       with:
-        python-version: 3.11
+        python-version: 3.13
     - name: Install tox
       run: pip install tox
     - name: Run unit tests with tox
