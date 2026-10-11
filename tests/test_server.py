@@ -18,6 +18,7 @@ from server import (
     OBOOKSRV_BOOK_FILE,
     OBOOKSRV_BOOK_LABEL,
     _apply_web_analysis_state,
+    _allow_onboard_without_auth,
     _build_scanned_setup_board,
     _cached_setup_position_fen,
     _channel_action_requires_remote_auth,
@@ -39,6 +40,7 @@ from server import (
     _engine_menu_payload,
     _apply_engine_menu_sort,
     _mode_text,
+    _onboard_request_requires_auth,
     mame_set_position_is_engine_turn,
     clear_preserved_mame_history,
     mame_history_will_be_rebased,
@@ -1398,6 +1400,43 @@ class TestServerChannelAuth(unittest.TestCase):
             "set_position_side",
         ):
             self.assertFalse(_channel_action_requires_remote_auth(action), action)
+
+
+class TestServerOnboardingAuth(unittest.TestCase):
+    def test_missing_setting_requires_auth(self):
+        with patch("server._load_ini_entries", return_value=("picochess.ini", [], [], {})):
+            self.assertFalse(_allow_onboard_without_auth())
+
+    def test_unreadable_configuration_requires_auth(self):
+        with patch("server._load_ini_entries", side_effect=OSError):
+            self.assertFalse(_allow_onboard_without_auth())
+
+    def test_disabled_setting_requires_auth(self):
+        entries = {"allow-onboard-without-auth": {"enabled": False, "value": "true"}}
+        with patch("server._load_ini_entries", return_value=("picochess.ini", [], [], entries)):
+            self.assertFalse(_allow_onboard_without_auth())
+
+    def test_setting_requires_explicit_true_value(self):
+        for value, expected in (("true", True), ("yes", True), ("false", False), ("", False)):
+            with self.subTest(value=value):
+                entries = {"allow-onboard-without-auth": {"enabled": True, "value": value}}
+                with patch("server._load_ini_entries", return_value=("picochess.ini", [], [], entries)):
+                    self.assertEqual(expected, _allow_onboard_without_auth())
+
+    def test_explicit_true_allows_private_client_without_auth(self):
+        request = Mock(remote_ip="192.168.1.20")
+        with patch("server._allow_onboard_without_auth", return_value=True):
+            self.assertFalse(_onboard_request_requires_auth(request))
+
+    def test_explicit_false_requires_auth_for_private_client(self):
+        request = Mock(remote_ip="192.168.1.20")
+        with patch("server._allow_onboard_without_auth", return_value=False):
+            self.assertTrue(_onboard_request_requires_auth(request))
+
+    def test_explicit_true_still_requires_auth_for_public_client(self):
+        request = Mock(remote_ip="8.8.8.8")
+        with patch("server._allow_onboard_without_auth", return_value=True):
+            self.assertTrue(_onboard_request_requires_auth(request))
 
 
 class TestServerUnsupportedHostActions(unittest.IsolatedAsyncioTestCase):

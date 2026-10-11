@@ -1016,15 +1016,22 @@ def _load_ini_entries():
 
 
 def _allow_onboard_without_auth() -> bool:
+    # Read this setting live so authentication can be tightened after onboarding
+    # without restarting PicoChess.
     try:
         _, _, _, entries_map = _load_ini_entries()
     except OSError:
-        return True
+        return False
     entry = entries_map.get("allow-onboard-without-auth")
     if not entry or not entry.get("enabled", True):
-        return True
+        return False
     value = str(entry.get("value", "")).strip().lower()
     return value in ("1", "true", "yes", "on")
+
+
+def _onboard_request_requires_auth(request) -> bool:
+    """Keep onboarding authenticated unless a private client is explicitly exempted."""
+    return not (_allow_onboard_without_auth() and _is_private_request(request))
 
 
 class ServerRequestHandler(tornado.web.RequestHandler):
@@ -2771,8 +2778,7 @@ class SettingsSaveHandler(ServerRequestHandler):
 
 class WifiSetupPageHandler(tornado.web.RequestHandler):
     def get(self):
-        allow_unauth = _allow_onboard_without_auth()
-        if not allow_unauth or not _is_private_request(self.request):
+        if _onboard_request_requires_auth(self.request):
             if not _require_auth_if_remote(self, "WiFi Setup"):
                 return
         self.render("web/picoweb/templates/onboard.html")
@@ -2780,8 +2786,7 @@ class WifiSetupPageHandler(tornado.web.RequestHandler):
 
 class WifiSetupHandler(ServerRequestHandler):
     async def post(self):
-        allow_unauth = _allow_onboard_without_auth()
-        if not allow_unauth or not _is_private_request(self.request):
+        if _onboard_request_requires_auth(self.request):
             if not _require_auth_if_remote(self, "WiFi Setup"):
                 return
         try:
@@ -2845,9 +2850,8 @@ class WifiSetupHandler(ServerRequestHandler):
 
 class SettingsActionHandler(ServerRequestHandler):
     async def post(self, action: str):
-        allow_unauth = _allow_onboard_without_auth()
         if action == "wifi-hotspot":
-            if not allow_unauth or not _is_private_request(self.request):
+            if _onboard_request_requires_auth(self.request):
                 if not _require_auth_if_remote(self, "Settings"):
                     return
         else:

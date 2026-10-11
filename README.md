@@ -94,14 +94,19 @@ If your Pi boots without Wi‑Fi configured, you can set it from the web UI:
 1) Connect the Pi to a temporary network (e.g., phone hotspot or Ethernet).
 2) Open the web UI and go to Settings → Wi‑Fi.
 3) Run `sudo ./enable-wifi-setup.sh` once on the Pi to allow Wi‑Fi changes.
-4) Enter your Wi‑Fi SSID/password and click Connect.
-5) After onboarding, you can tighten access by setting `allow-onboard-without-auth = false` in `picochess.ini`.
+4) Authenticate with the operating-system account when opening the Wi-Fi onboarding page.
+5) Enter your Wi‑Fi SSID/password and click Connect.
+
+On a trusted setup network, you can temporarily set `allow-onboard-without-auth = true` in
+`picochess.ini`. For direct connections, this exception is limited to clients with a private or
+link-local source address; set it back to `false` when onboarding is complete.
 Tip: for first‑time setup, the simplest path is to start your phone hotspot, then use System → Wi‑Fi → Hotspot on the clock to connect and get the Pi’s IP on the display.
 
 Cybersecurity notes
 -------------------
-- The Wi‑Fi onboarding page is open to private network clients by default to simplify first‑boot setup.
-- After onboarding, set `allow-onboard-without-auth = false` in `picochess.ini` to require authentication.
+- The Wi‑Fi onboarding page requires authentication by default.
+- `allow-onboard-without-auth = true` is an explicit temporary exception for trusted setup networks.
+- Existing installations that already set this option to `true` remain open until it is set to `false`.
 - The Settings page always requires authentication.
 
 Bluetooth pairing (experimental)
