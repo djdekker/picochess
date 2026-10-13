@@ -1030,7 +1030,7 @@
                         var systemInfo = window._picoSystemInfo || {};
                         var pgnReplayMode = systemInfo.interaction_mode === 'pgnreplay';
                         var pgnReplayRunning = pgnReplayMode && systemInfo.pgn_replay_autoplay === true;
-                        var engineMode = ['normal', 'brain', 'training'].indexOf(systemInfo.interaction_mode) !== -1;
+                        var engineMode = ['normal', 'brain', 'training', 'engine_match'].indexOf(systemInfo.interaction_mode) !== -1;
                         var hasUserColor = systemInfo.play_mode === 'user_white' || systemInfo.play_mode === 'user_black';
                         var userColor = systemInfo.play_mode === 'user_black' ? 'black' : 'white';
                         var turnColor = getFenTurnColor();
@@ -1276,7 +1276,7 @@
             function refreshEngineTurnFromPosition() {
                 var sysInfo = window._picoSystemInfo || {};
                 var mode = String(sysInfo.interaction_mode || '').toLowerCase();
-                var engineMode = ['normal', 'brain', 'training'].indexOf(mode) !== -1;
+                var engineMode = ['normal', 'brain', 'training', 'engine_match'].indexOf(mode) !== -1;
                 var userColor = sysInfo.play_mode === 'user_black' ? 'black' :
                     (sysInfo.play_mode === 'user_white' ? 'white' : '');
                 var turnColor = overlayTurnColor();
@@ -1345,6 +1345,7 @@
                 if (!gridEl) return;
                 gridEl.innerHTML = '';
                 var current = String((window._picoSystemInfo || {}).interaction_mode || 'normal').toLowerCase();
+                var selectedMode = current === 'engine_match' ? 'remote' : current;
                 var checkpointAvailable = Boolean((window._picoSystemInfo || {}).position_checkpoint_available);
                 var checkpointReturnMode = (window._picoSystemInfo || {}).position_checkpoint_return_mode;
                 var coach   = normalizeTutorSettings(window._picoTutorSettings).tutor_coach;
@@ -1357,7 +1358,7 @@
                 _modeDefs.forEach(function(def) {
                     var isActive = def.key === 'handbrain'
                         ? hbActive
-                        : (current === def.key);
+                        : (selectedMode === def.key);
                     var btn = document.createElement('button');
                     btn.className = 'pico-sub-tile' + (isActive ? ' selected' : '');
                     var lEl = document.createElement('span'); lEl.className = 'pico-sub-tile-label';
@@ -3645,6 +3646,7 @@
                     ponder: 'Analysis',
                     training: 'Practice',
                     remote: 'Two-Player Remote',
+                    engine_match: 'Two-Player Remote',
                     pgnreplay: 'PGN Replay'
                 };
                 return menuText(labels[String(mode || '').toLowerCase()] || 'Play');

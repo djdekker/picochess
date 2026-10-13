@@ -348,6 +348,7 @@ class Mode(MyEnum):
     KIBITZ = "B00_mode_kibitz_menu"
     OBSERVE = "B00_mode_observe_menu"
     REMOTE = "B00_mode_remote_menu"
+    ENGINE_MATCH = "B00_mode_engine_match_menu"
     PONDER = "B00_mode_ponder_menu"
     PGNREPLAY = "B00_mode_pgnreplay_menu"
 
@@ -361,9 +362,15 @@ class Mode(MyEnum):
             Mode.KIBITZ,
             Mode.OBSERVE,
             Mode.REMOTE,
+            Mode.ENGINE_MATCH,
             Mode.PONDER,
             Mode.PGNREPLAY,
         ]
+
+    @classmethod
+    def menu_items(cls):
+        """Return modes exposed to users; ENGINE_MATCH is a configured REMOTE variant."""
+        return [mode for mode in cls.items() if mode != Mode.ENGINE_MATCH]
 
 
 class ModeLoop(object):
@@ -375,12 +382,12 @@ class ModeLoop(object):
     @staticmethod
     def next(item: Mode):
         """Get next item."""
-        return next_item(Mode.items(), item, "errModeNext")
+        return next_item(Mode.menu_items(), item, "errModeNext")
 
     @staticmethod
     def prev(item: Mode):
         """Get previous item."""
-        return prev_item(Mode.items(), item, "errModePrev")
+        return prev_item(Mode.menu_items(), item, "errModePrev")
 
 
 @enum.unique
@@ -904,6 +911,41 @@ def game_result_from_header(result_str: str) -> GameResult:
         # Unknown result strings map to abort ("*") instead of failing loudly.
         logger.warning("can not map bad result string %s", result_str)
         return GameResult.ABORT
+
+
+_WHITE_WINS = (
+    GameResult.WIN_WHITE,
+    GameResult.THREE_CHECK_WHITE,
+    GameResult.ATOMIC_WHITE,
+    GameResult.KOTH_WHITE,
+    GameResult.RK_WHITE,
+    GameResult.ANTICHESS_WHITE,
+)
+_BLACK_WINS = (
+    GameResult.WIN_BLACK,
+    GameResult.THREE_CHECK_BLACK,
+    GameResult.ATOMIC_BLACK,
+    GameResult.KOTH_BLACK,
+    GameResult.RK_BLACK,
+    GameResult.ANTICHESS_BLACK,
+)
+
+
+def game_ending_from_result(result: GameResult, game) -> str | None:
+    """
+    Return the PGN result string ('1-0', '0-1', '1/2-1/2') recorded for a
+    GAME_ENDS message, or None when the result leaves the game ending unchanged.
+    For MATE and OUT_OF_TIME the side that moved last has won.
+    """
+    if result == GameResult.DRAW:
+        return "1/2-1/2"
+    if result in _WHITE_WINS:
+        return "1-0"
+    if result in _BLACK_WINS:
+        return "0-1"
+    if result in (GameResult.OUT_OF_TIME, GameResult.MATE):
+        return "0-1" if game.turn else "1-0"  # game.turn is True for White
+    return None
 
 
 @enum.unique

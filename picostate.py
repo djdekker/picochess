@@ -87,6 +87,7 @@ class PicochessState:
         self.engine_move_was_book = False
         self.engine_search_revision = 0
         self.game_declared = False  # User declared resignation or draw
+        self.game_generation = 0  # Counts New Game events, so delayed game-end handling can spot a new game.
         self.local_timeout_reported = False  # Show a local flag fall once per game while allowing play to continue.
         self.game_started = False  # Lifecycle flag: true once play has started, even after takeback to move 0.
         self.interaction_mode = Mode.NORMAL
@@ -455,6 +456,7 @@ class PicochessState:
             Mode.BRAIN,
             Mode.OBSERVE,
             Mode.REMOTE,
+            Mode.ENGINE_MATCH,
             Mode.TRAINING,
         ):
             self.game_started = True
@@ -478,6 +480,7 @@ class PicochessState:
             Mode.BRAIN,
             Mode.OBSERVE,
             Mode.REMOTE,
+            Mode.ENGINE_MATCH,
             Mode.TRAINING,
         ):
             self.time_control.stop_internal(refund_seconds=refund_seconds)
@@ -512,7 +515,13 @@ class PicochessState:
 
     def is_not_user_turn(self) -> bool:
         """Return True if it is NOT users turn (only valid in normal, brain or remote mode)."""
-        assert self.interaction_mode in (Mode.NORMAL, Mode.BRAIN, Mode.REMOTE, Mode.TRAINING), (
+        assert self.interaction_mode in (
+            Mode.NORMAL,
+            Mode.BRAIN,
+            Mode.REMOTE,
+            Mode.ENGINE_MATCH,
+            Mode.TRAINING,
+        ), (
             "wrong mode: %s" % self.interaction_mode
         )
         condition1 = self.play_mode == PlayMode.USER_WHITE and self.game.turn == chess.BLACK

@@ -433,6 +433,7 @@ def _mode_label(mode: Mode) -> str:
         Mode.KIBITZ: "Eval.Score",
         Mode.OBSERVE: "Observe",
         Mode.REMOTE: "Remote",
+        Mode.ENGINE_MATCH: "Remote",
         Mode.PONDER: "Analysis",
         Mode.PGNREPLAY: "PGN Replay",
     }
@@ -3011,6 +3012,7 @@ class WebVr(DgtIface):
     def _display_time(self, time_left: int, time_right: int):
         if time_left >= 3600 * 10 or time_right >= 3600 * 10:
             logger.debug("time values not set - abort function")
+            return False
         elif self.clock_show_time:
             l_hms = hms_time(time_left)
             r_hms = hms_time(time_right)
@@ -3036,6 +3038,8 @@ class WebVr(DgtIface):
                 f'<span class="{r_cls}">{text_r}</span>'
             )
             EventHandler.write_to_clients(self._clock_event(text))
+            return True
+        return False
 
     def display_move_on_clock(self, message):
         """Display a move on the web clock."""
@@ -3083,11 +3087,16 @@ class WebVr(DgtIface):
         if self.get_name() not in message.devs:
             logger.debug("ignored endText - devs: %s", message.devs)
             return True
-        if self.side_running != ClockSide.NONE or message.force:
-            self.clock_show_time = True
-            self._display_time(self.l_time, self.r_time)
-        else:
-            logger.debug("(web) clock isnt running - no need for endText")
+        # The web clock also caches its last payload for newly connected
+        # clients. Restore the stopped clock after a timed move/text message;
+        # otherwise that temporary message survives indefinitely and is sent
+        # again on reconnect.
+        self.clock_show_time = True
+        if not self._display_time(self.l_time, self.r_time):
+            # Before the first SET_CLOCK there is no useful time to render.
+            # Clear the expired temporary message instead of caching it for
+            # future websocket clients.
+            EventHandler.write_to_clients(self._clock_event(""))
         return True
 
     async def stop_clock(self, devs: set):
@@ -3331,7 +3340,15 @@ class WebDisplay(DisplayMsg):
                     if suffix.isdigit():
                         comp_elo = int(suffix)
                         engine_level = ""
-            if "play_mode" in self.shared["game_info"]:
+            if self.shared["game_info"].get("interaction_mode") == Mode.ENGINE_MATCH:
+                system_info = self.shared.get("system_info", {})
+                remote_name = system_info.get("engine_match_remote_engine_name") or "Remote"
+                remote_elo = system_info.get("engine_match_remote_engine_elo") or "-"
+                pgn_game.headers["White"] = WebDisplay.engine_name
+                pgn_game.headers["Black"] = str(remote_name)
+                pgn_game.headers["WhiteElo"] = str(system_info.get("engine_elo") or "-")
+                pgn_game.headers["BlackElo"] = str(remote_elo)
+            elif "play_mode" in self.shared["game_info"]:
                 if self.shared["game_info"]["play_mode"] == PlayMode.USER_WHITE:
                     pgn_game.headers["White"] = user_name
                     pgn_game.headers["Black"] = WebDisplay.engine_name + engine_level + retro_speed_str
@@ -3613,6 +3630,9 @@ class WebDisplay(DisplayMsg):
                 self.shared["system_info"]["user_name_orig"] = self.shared["system_info"]["user_name"]
             if "user_elo" in self.shared["system_info"]:
                 WebDisplay.user_elo_sav = self.shared["system_info"]["user_elo"]
+            if "engine_match_remote_engine_name" in message.info:
+                _build_headers()
+                _send_headers()
 
         elif isinstance(message, Message.ENGINE_STARTUP):
             for index in range(0, len(message.installed_engines)):
@@ -3654,6 +3674,7 @@ class WebDisplay(DisplayMsg):
 
         elif isinstance(message, Message.STARTUP_INFO):
             self.shared["game_info"] = message.info.copy()
+            startup_game = self.shared["game_info"].pop("game", None)
             # Mirror interaction_mode and play_mode into system_info so the
             # web client can determine diagram interactivity on page load.
             self._create_system_info()
@@ -3694,6 +3715,19 @@ class WebDisplay(DisplayMsg):
                 WebDisplay.level_name_sav = ""
             else:
                 WebDisplay.level_name_sav = self.shared["game_info"]["level_name"]
+
+            if startup_game is not None:
+                result = {
+                    "pgn": _transfer(startup_game),
+                    "fen": _oldstyle_fen(startup_game) if startup_game.move_stack else startup_game.fen(),
+                    "event": "Game",
+                    "move": "0000",
+                    "play": "newgame",
+                    "mistakes": [],
+                }
+                _attach_variant_info(result)
+                self.shared["last_dgt_move_msg"] = result
+                EventHandler.write_to_clients(result)
 
             # The browser may connect before engine startup finishes (especially
             # with MAME). Publish board authority and modes together so it can

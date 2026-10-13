@@ -6026,7 +6026,7 @@ class DgtTranslate(object):
                 medium_text="Osserva ",
                 small_text="osserv",
             )
-        if text_id == "mode_remote_menu":
+        if text_id in ("mode_remote_menu", "mode_engine_match_menu"):
             entxt = Dgt.DISPLAY_TEXT(
                 web_text="",
                 large_text="Remote     ",

@@ -832,6 +832,7 @@ class DgtDisplay(DisplayMsg):
             Mode.BRAIN,
             Mode.OBSERVE,
             Mode.REMOTE,
+            Mode.ENGINE_MATCH,
             Mode.TRAINING,
         ):
             await self._set_clock()
@@ -1265,6 +1266,7 @@ class DgtDisplay(DisplayMsg):
             Mode.NORMAL,
             Mode.BRAIN,
             Mode.REMOTE,
+            Mode.ENGINE_MATCH,
             Mode.TRAINING,
         ):
             side = self._get_clock_side(self.play_turn)
@@ -1442,39 +1444,8 @@ class DgtDisplay(DisplayMsg):
             logger.debug("game_ends outside if: result %s", message.result)
             if not self.dgtmenu.get_engine_restart():  # filter out the shutdown/reboot process
                 logger.debug("inside if: result.value %s", message.result.value)
-                if message.result == GameResult.DRAW:
-                    ModeInfo.set_game_ending(result="1/2-1/2")
-                elif message.result == GameResult.WIN_WHITE:
-                    ModeInfo.set_game_ending(result="1-0")
-                elif message.result == GameResult.WIN_BLACK:
-                    ModeInfo.set_game_ending(result="0-1")
-                elif message.result == GameResult.THREE_CHECK_WHITE:
-                    ModeInfo.set_game_ending(result="1-0")
-                elif message.result == GameResult.THREE_CHECK_BLACK:
-                    ModeInfo.set_game_ending(result="0-1")
-                elif message.result == GameResult.ATOMIC_WHITE:
-                    ModeInfo.set_game_ending(result="1-0")
-                elif message.result == GameResult.ATOMIC_BLACK:
-                    ModeInfo.set_game_ending(result="0-1")
-                elif message.result == GameResult.KOTH_WHITE:
-                    ModeInfo.set_game_ending(result="1-0")
-                elif message.result == GameResult.KOTH_BLACK:
-                    ModeInfo.set_game_ending(result="0-1")
-                elif message.result == GameResult.RK_WHITE:
-                    ModeInfo.set_game_ending(result="1-0")
-                elif message.result == GameResult.RK_BLACK:
-                    ModeInfo.set_game_ending(result="0-1")
-                elif message.result == GameResult.ANTICHESS_WHITE:
-                    ModeInfo.set_game_ending(result="1-0")
-                elif message.result == GameResult.ANTICHESS_BLACK:
-                    ModeInfo.set_game_ending(result="0-1")
-                elif message.result == GameResult.OUT_OF_TIME or message.result == GameResult.MATE:
-                    # last moved has won
-                    if message.game.turn == chess.WHITE:
-                        ModeInfo.set_game_ending(result="0-1")
-                    else:
-                        ModeInfo.set_game_ending(result="1-0")
-
+                # DisplayMsg.show() records the game ending when GAME_ENDS is sent.
+                # Writing it here, from this slower queue, could overwrite a new game.
                 text = self.dgttranslate.text(message.result.value)
                 text.beep = self.dgttranslate.bl(BeepLevel.CONFIG)
                 # A stopped clock conveys no useful information after the game
