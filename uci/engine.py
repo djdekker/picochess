@@ -32,9 +32,6 @@ import configparser
 import copy
 from pathlib import Path
 
-import spur  # type: ignore
-import paramiko
-
 import asyncssh  # type: ignore
 
 import chess.engine  # type: ignore
@@ -379,51 +376,8 @@ class EngineLease:
         return self._owner
 
 
-class WindowsShellType:
-    """Shell type supporting Windows for spur."""
-
-    supports_which = True
-
-    def generate_run_command(self, command_args, store_pid, cwd=None, update_env=None, new_process_group=False):
-        if not update_env:
-            update_env = {}
-        if new_process_group:
-            raise spur.ssh.UnsupportedArgumentError("'new_process_group' is not supported when using a windows shell")
-
-        commands = []
-        if command_args[0] == "kill":
-            command_args = self.generate_kill_command(command_args[-1]).split()
-
-        if store_pid:
-            commands.append("powershell (Get-WmiObject Win32_Process -Filter ProcessId=$PID).ParentProcessId")
-
-        if cwd is not None:
-            commands.append(
-                "cd {0} 2>&1 || ( echo. & echo spur-cd: %errorlevel% & exit 1 )".format(self.win_escape_sh(cwd))
-            )
-            commands.append("echo. & echo spur-cd: 0")
-
-        update_env_commands = ["SET {0}={1}".format(key, value) for key, value in update_env.items()]
-        commands += update_env_commands
-        commands.append(
-            "( (powershell Get-Command {0} > nul 2>&1) && echo 0) || (echo %errorlevel% & exit 1)".format(
-                self.win_escape_sh(command_args[0])
-            )
-        )
-
-        commands.append(" ".join(command_args))
-        return " & ".join(commands)
-
-    def generate_kill_command(self, pid):
-        return "taskkill /F /PID {0}".format(pid)
-
-    @staticmethod
-    def win_escape_sh(value):
-        return '"' + value + '"'
-
-
 class UciShell(object):
-    """Handle the uci engine shell."""
+    """Hold local or remote UCI engine connection settings."""
 
     def __init__(self, hostname=None, username=None, key_file=None, password=None, windows=False, remote_home=None):
         super(UciShell, self).__init__()
@@ -433,30 +387,9 @@ class UciShell(object):
         self.password = password
         self.remote_home = remote_home
         self.windows = windows
-        if hostname:
-            logger.info("connecting to [%s]", hostname)
-            shell_params = {
-                "hostname": hostname,
-                "username": username,
-                "missing_host_key": paramiko.AutoAddPolicy(),
-            }
-            if key_file:
-                shell_params["private_key_file"] = key_file
-            else:
-                shell_params["password"] = password
-            if windows:
-                shell_params["shell_type"] = WindowsShellType()
-
-            self._shell = spur.SshShell(**shell_params)
-        else:
-            self._shell = None
-
-    def __getattr__(self, attr):
-        """Dispatch unknown attributes to SshShell."""
-        return getattr(self._shell, attr)
 
     def get(self):
-        return self if self._shell is not None else None
+        return self if self.hostname else None
 
 
 class ContinuousAnalysis:
@@ -489,6 +422,7 @@ class ContinuousAnalysis:
         self.multipv = None  # multipv for analysis - set in start
         self._analysis_started_ts: float | None = None
         self._active_analysis: AnalysisResult | None = None
+        self._ready_ping_task: asyncio.Task | None = None
         self._failure_reason: str | None = None
         self._last_stop_was_forced = False
         self.lock = asyncio.Lock()
@@ -509,13 +443,29 @@ class ContinuousAnalysis:
         return self.limit_reached
 
     async def _wait_for_engine_ready(self, timeout: float = 1.0) -> bool:
-        """Wait until engine responds to a ping without raising (engine 'ready')."""
+        """Wait briefly for readiness without cancelling python-chess's ping command."""
         if not self.engine:
             return False
+        if self._ready_ping_task is None:
+            self._ready_ping_task = self.loop.create_task(self.engine.ping())
+
+            # A timed-out ping remains active so a late readyok can finish the
+            # python-chess command cleanly. Consume its exception even if the
+            # analyser is stopped or the engine is replaced before the next poll.
+            def consume_exception(task: asyncio.Task) -> None:
+                if not task.cancelled():
+                    task.exception()
+
+            self._ready_ping_task.add_done_callback(consume_exception)
         try:
-            await asyncio.wait_for(self.engine.ping(), timeout=timeout)
+            await asyncio.wait_for(asyncio.shield(self._ready_ping_task), timeout=timeout)
+            self._ready_ping_task = None
             return True
+        except asyncio.TimeoutError:
+            logger.debug("%s engine readiness ping still pending", self.whoami)
+            return False
         except Exception as e:
+            self._ready_ping_task = None
             logger.debug("%s engine not ready: %s", self.whoami, e)
             return False
 
@@ -662,7 +612,9 @@ class ContinuousAnalysis:
             # Wait briefly until the engine is ready before starting analysis
             ready = await self._wait_for_engine_ready(timeout=0.5)
             if not ready:
-                logger.warning("%s engine not ready, analysis may fail", self.whoami)
+                logger.debug("%s engine not ready; postponing analysis", self.whoami)
+                await asyncio.sleep(self.delay)
+                return
 
             self._analysis_started_ts = self.loop.time() if self.loop else None
             # Avoid `with await engine.analysis() as analysis` because the context-manager
@@ -1238,7 +1190,6 @@ class UciEngine(object):
         self.options: dict = {}
         self.res: PlayResult = None
         self.level_support = False
-        self.shell = None  # check if uci files can be used any more
         self.whoami = engine_debug_name
         self.engine_lock = asyncio.Lock()
         self.engine_lease: EngineLease | None = None
@@ -1469,12 +1420,25 @@ class UciEngine(object):
         return False
 
     async def _recover_from_failed_analyser_stop(self, reason: str) -> bool:
-        """Restart the engine before releasing the lease after a dirty analysis stop."""
+        """Restart the engine, completing setup even if the analyser is cancelled."""
         if self._shutting_down:
             logger.debug("%s recovery skipped while engine is shutting down", reason)
             if self.analyser:
                 self.analyser.clear_failure()
             return True
+        recovery_task = asyncio.create_task(self._recover_from_failed_analyser_stop_inner(reason))
+        try:
+            return await asyncio.shield(recovery_task)
+        except CancelledError:
+            # stop_analysis() may cancel the analyser while this callback is
+            # reopening the engine. Let the transaction finish so it cannot
+            # leave a live engine permanently marked as setup-incomplete.
+            logger.debug("%s recovery cancellation deferred until setup completes", reason)
+            await asyncio.shield(recovery_task)
+            raise
+
+    async def _recover_from_failed_analyser_stop_inner(self, reason: str) -> bool:
+        """Perform the engine restart transaction for analyser recovery."""
         logger.warning("%s - restarting engine %s", reason, self.engine_name)
         should_send_options = False
         async with self.engine_lock:
@@ -2196,15 +2160,7 @@ class UciEngine(object):
         parser.optionxform = str  # type: ignore
 
         if not options:
-            if self.shell is None:
-                success = bool(parser.read(self.get_file() + ".uci"))
-            else:
-                try:
-                    with self.shell.open(self.get_file() + ".uci", "r") as file:
-                        parser.read_file(file)
-                    success = True
-                except FileNotFoundError:
-                    success = False
+            success = bool(parser.read(self.get_file() + ".uci"))
             if success:
                 sections = parser.sections()
                 if sections:
