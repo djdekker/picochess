@@ -1425,6 +1425,19 @@ class TestStopSearchTimeout(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await self.controller.stop_search())
 
+    async def test_stop_search_and_clock_propagates_failed_stop(self):
+        self.controller.state = SimpleNamespace(
+            interaction_mode=Mode.NORMAL,
+            stop_clock=AsyncMock(),
+        )
+        self.controller.engine.is_thinking.return_value = True
+        self.controller.engine.is_waiting.return_value = False
+        self.controller.stop_search = AsyncMock(return_value=False)
+
+        self.assertFalse(await self.controller.stop_search_and_clock())
+        self.controller.state.stop_clock.assert_awaited_once_with()
+        self.controller.stop_search.assert_awaited_once_with()
+
 
 class TestInteractionModeSwitch(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -1448,7 +1461,7 @@ class TestInteractionModeSwitch(unittest.IsolatedAsyncioTestCase):
         self.controller._stop_engine_match = AsyncMock()
         self.controller.get_rid_of_engine_move = AsyncMock()
         self.controller._set_pgn_replay_autoplay = Mock()
-        self.controller.stop_search_and_clock = AsyncMock()
+        self.controller.stop_search_and_clock = AsyncMock(return_value=True)
         self.controller._save_position_checkpoint = AsyncMock()
         self.controller._clear_position_checkpoint = Mock()
         self.controller.engine_mode = AsyncMock()
@@ -1468,6 +1481,7 @@ class TestInteractionModeSwitch(unittest.IsolatedAsyncioTestCase):
         async def stop_old_mode():
             self.assertEqual(Mode.NORMAL, self.controller.state.interaction_mode)
             order.append("stop")
+            return True
 
         async def activate_new_mode():
             self.assertEqual(Mode.PONDER, self.controller.state.interaction_mode)
@@ -1496,6 +1510,7 @@ class TestInteractionModeSwitch(unittest.IsolatedAsyncioTestCase):
         async def stop_old_mode():
             self.assertEqual(Mode.PONDER, self.controller.state.interaction_mode)
             order.append("stop")
+            return True
 
         async def activate_new_mode():
             self.assertEqual(Mode.NORMAL, self.controller.state.interaction_mode)
@@ -1564,6 +1579,18 @@ class TestInteractionModeSwitch(unittest.IsolatedAsyncioTestCase):
         self.controller.get_rid_of_engine_move.assert_awaited_once_with()
         self.assertEqual(Mode.PONDER, self.controller.state.interaction_mode)
         self.assertEqual(8, self.controller.state.engine_search_revision)
+
+    async def test_failed_stop_aborts_mode_transition_with_one_failure_message(self):
+        self.controller.stop_search_and_clock.return_value = False
+
+        await self.controller.process_main_events(self.mode_event(Mode.PONDER))
+
+        self.assertEqual(Mode.NORMAL, self.controller.state.interaction_mode)
+        self.controller.engine_mode.assert_not_awaited()
+        self.controller._save_position_checkpoint.assert_not_awaited()
+        self.controller.set_wait_state.assert_not_awaited()
+        self.show.assert_awaited_once()
+        self.assertIsInstance(self.show.await_args.args[0], Message.ENGINE_FAIL)
 
 
 class TestBestMoveModeTransitionRace(unittest.IsolatedAsyncioTestCase):

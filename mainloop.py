@@ -993,8 +993,8 @@ class MainLoop:
             logger.warning("engine still not idle after %.1fs", timeout)
         return idle
 
-    async def stop_search_and_clock(self, ponder_hit=False):
-        """Depending on the interaction mode stop search and clock."""
+    async def stop_search_and_clock(self, ponder_hit=False) -> bool:
+        """Stop the active search/clock and report whether the engine is idle."""
         logger.debug(
             "stop_search_and_clock called (mode=%s, ponder_hit=%s, thinking=%s, waiting=%s)\n%s",
             self.state.interaction_mode,
@@ -1012,12 +1012,20 @@ class MainLoop:
                 if ponder_hit:
                     pass  # we send the self.engine.hit() lateron!
                 else:
-                    await self.stop_search()
+                    return await self.stop_search()
+            return True
         elif self.state.interaction_mode in (Mode.REMOTE, Mode.OBSERVE):
             await self.state.stop_clock()
-            await self.stop_search()
+            return await self.stop_search()
         elif self.state.interaction_mode in (Mode.ANALYSIS, Mode.KIBITZ, Mode.PONDER, Mode.PGNREPLAY):
-            await self.stop_search()
+            return await self.stop_search()
+        return True
+
+    async def _report_failed_engine_stop(self, transition: str) -> bool:
+        """Report one policy-layer failure and let the caller abort its transition."""
+        logger.error("%s aborted because the engine search did not stop cleanly", transition)
+        await DisplayMsg.show(Message.ENGINE_FAIL())
+        return False
 
     def get_comment_file(self) -> str:
         comment_path = self.state.engine_file + "_comments_" + self.args.language + ".txt"
@@ -1711,7 +1719,8 @@ class MainLoop:
                 return
         if not self.state.reset_auto:
             if self.state.automatic_takeback:
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("automatic takeback")
                 self.state.reset_auto = True
             await DisplayMsg.show(msg)
         else:
@@ -1771,7 +1780,8 @@ class MainLoop:
     async def takeback(self):
         if self.state.game.move_stack:
             self._invalidate_user_move_tasks()
-        await self.stop_search_and_clock()
+        if not await self.stop_search_and_clock():
+            return await self._report_failed_engine_stop("takeback")
         l_error = False
         try:
             self.state.pop_move()
@@ -1817,7 +1827,8 @@ class MainLoop:
             self.state.no_guess_white = 1
 
         if not self.engine.is_waiting():
-            await self.stop_search_and_clock()
+            if not await self.stop_search_and_clock():
+                return await self._report_failed_engine_stop("PGN replay side change")
 
         self.state.last_legal_fens = []
         self.state.legal_fens_after_cmove = []
@@ -1887,7 +1898,8 @@ class MainLoop:
                     play_mode=self.state.play_mode, play_mode_text=self.state.dgttranslate.text(text)
                 )
 
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("online side change")
 
                 self.state.last_legal_fens = []
                 self.state.legal_fens_after_cmove = []
@@ -2272,9 +2284,11 @@ class MainLoop:
                 self.state.legal_fens = []
                 self.state.legal_fens_after_cmove = []
                 if self.online_mode():
-                    await self.stop_search_and_clock()
+                    if not await self.stop_search_and_clock():
+                        return await self._report_failed_engine_stop("online game end")
                     self.state.stop_fen_timer()
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("game end")
                 await self._show_game_end(game_end, game_generation)
             else:
                 self.state.searchmoves.reset()
@@ -2399,9 +2413,11 @@ class MainLoop:
                 self.state.legal_fens = []
                 self.state.legal_fens_after_cmove = []
                 if self.online_mode():
-                    await self.stop_search_and_clock()
+                    if not await self.stop_search_and_clock():
+                        return await self._report_failed_engine_stop("online engine game end")
                     self.state.stop_fen_timer()
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("engine game end")
                 if not self.pgn_mode():
                     await self._show_game_end(game_end, game_generation)
             else:
@@ -2544,7 +2560,8 @@ class MainLoop:
                         logger.info("current game fen      : %s", self.state.game.fen())
                         logger.info("undoing game until fen: %s", fen)
                         self._invalidate_user_move_tasks()
-                        await self.stop_search_and_clock()
+                        if not await self.stop_search_and_clock():
+                            return await self._report_failed_engine_stop("physical takeback")
                         while len(game_copy.move_stack) < len(self.state.game.move_stack):
                             self.state.pop_move()
 
@@ -2787,7 +2804,8 @@ class MainLoop:
 
             # Clock logic after user move
             #
-            await self.stop_search_and_clock(ponder_hit=ponder_hit)
+            if not await self.stop_search_and_clock(ponder_hit=ponder_hit):
+                return await self._report_failed_engine_stop("user move")
             if (
                 self.state.interaction_mode
                 in (Mode.NORMAL, Mode.BRAIN, Mode.OBSERVE, Mode.REMOTE, Mode.TRAINING, Mode.ENGINE_MATCH)
@@ -4255,7 +4273,8 @@ class MainLoop:
             }
         )
 
-        await self.stop_search_and_clock()
+        if not await self.stop_search_and_clock():
+            return await self._report_failed_engine_stop("Read Game")
         # reset best depth so new analysis results are not filtered by previous game
         self.state.best_sent_depth.reset()
 
@@ -4431,7 +4450,8 @@ class MainLoop:
         await self.state.picotutor.set_analysis_enabled(self.tutor_analysis_enabled_for_current_mode())
         await self.state.picotutor.set_mode(self.pgn_mode() or not self.eng_plays())
 
-        await self.stop_search_and_clock()
+        if not await self.stop_search_and_clock():
+            return await self._report_failed_engine_stop("loaded-game mode setup")
         await self.engine_mode()
         turn = self.state.game.turn
         self.state.done_computer_fen = None
@@ -4504,7 +4524,8 @@ class MainLoop:
         self.state.legal_fens = compute_legal_fens(self.state.game, self.state.get_variant_board())
         self.state.legal_fens_after_cmove = []
         self.state.last_legal_fens = []
-        await self.stop_search_and_clock()
+        if not await self.stop_search_and_clock():
+            return await self._report_failed_engine_stop("loaded-game finalization")
 
         game_end = self.state.check_game_state()
         if not start_replay:
@@ -5325,7 +5346,8 @@ class MainLoop:
                     await asyncio.sleep(2)
             elif self.emulation_mode() or self.pgn_mode():
                 # molli for emulation engines we have to reset to starting position
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("engine replacement setup")
                 game_fen = self.state.game.board_fen()
                 if self.state.variant == "racingkings":
                     self.state.game = chess.Board("8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1")
@@ -5613,7 +5635,8 @@ class MainLoop:
                 self.state._racingkings_board.set_fen(setup_fen)
 
             # see new_game
-            await self.stop_search_and_clock()
+            if not await self.stop_search_and_clock():
+                return await self._report_failed_engine_stop("Set Position")
             if not self._owns_set_position_ack(target_fen):
                 logger.info("Set Pos was cancelled while stopping the current game")
                 return
@@ -5800,7 +5823,8 @@ class MainLoop:
                         play_mode_text=self.state.dgttranslate.text(str(self.state.play_mode.value)),
                     )
                     await DisplayMsg.show(msg)
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("New Game")
 
                 # see setup_position
                 if self.engine.has_chess960():
@@ -5909,7 +5933,8 @@ class MainLoop:
                         await DisplayMsg.show(msg)
 
                     # see setup_position
-                    await self.stop_search_and_clock()
+                    if not await self.stop_search_and_clock():
+                        return await self._report_failed_engine_stop("new position")
                     self.state.stop_fen_timer()
 
                     if self.engine.has_chess960():
@@ -6200,7 +6225,8 @@ class MainLoop:
 
             elif self.state.interaction_mode in (Mode.NORMAL, Mode.BRAIN, Mode.TRAINING, Mode.ENGINE_MATCH):
                 if not self.engine.is_waiting():
-                    await self.stop_search_and_clock()
+                    if not await self.stop_search_and_clock():
+                        return await self._report_failed_engine_stop("switch sides")
                 self.state.automatic_takeback = False
                 self.state.takeback_active = False
                 self.state.reset_auto = False
@@ -6271,7 +6297,8 @@ class MainLoop:
 
             elif self.state.interaction_mode == Mode.REMOTE:
                 if not self.engine.is_waiting():
-                    await self.stop_search_and_clock()
+                    if not await self.stop_search_and_clock():
+                        return await self._report_failed_engine_stop("switch sides")
 
                 self.state.last_legal_fens = []
                 self.state.legal_fens_after_cmove = []
@@ -6318,7 +6345,8 @@ class MainLoop:
                 # Events run as concurrent tasks, so a New Game can be handled while
                 # this one waits for the search to stop. Its result must not end that game.
                 game_generation = self.state.game_generation
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("draw or resign")
                 if game_generation != self.state.game_generation:
                     logger.info("dropping game result %s: a new game has started", event.result)
                 else:
@@ -6359,7 +6387,8 @@ class MainLoop:
             logger.error("REMOTE match stopped: %s", event.reason)
             await self._stop_engine_match()
             if self.state.interaction_mode == Mode.ENGINE_MATCH:
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("engine match stop")
                 self.state.interaction_mode = Mode.NORMAL
                 self.state.dgtmenu.set_mode(Mode.NORMAL)
                 self.state.done_computer_fen = None
@@ -6416,7 +6445,8 @@ class MainLoop:
                             self.state.game.fen(),
                         )
                         return
-                    await self.stop_search_and_clock()
+                    if not await self.stop_search_and_clock():
+                        return await self._report_failed_engine_stop("remote move")
                     await DisplayMsg.show(
                         Message.COMPUTER_MOVE(
                             move=event.move,
@@ -6630,7 +6660,8 @@ class MainLoop:
                         else:
                             if self.pgn_mode():
                                 # molli: check if last move of pgn game file
-                                await self.stop_search_and_clock()
+                                if not await self.stop_search_and_clock():
+                                    return await self._report_failed_engine_stop("engine failure recovery")
                                 log_pgn(self.state)
                                 # in Pico V4 we cannot detect end of pgn game by depth
                                 # if max_guess uci option is zero - this must be end of game
@@ -6915,9 +6946,11 @@ class MainLoop:
                                 self.state.legal_fens = []
                                 self.state.legal_fens_after_cmove = []
                                 if self.online_mode():
-                                    await self.stop_search_and_clock()
+                                    if not await self.stop_search_and_clock():
+                                        return await self._report_failed_engine_stop("engine move recovery")
                                     self.state.stop_fen_timer()
-                                await self.stop_search_and_clock()
+                                if not await self.stop_search_and_clock():
+                                    return await self._report_failed_engine_stop("engine move recovery")
                                 if not self.pgn_mode():
                                     await self._show_game_end(game_end, game_generation)
                             else:
@@ -7121,7 +7154,8 @@ class MainLoop:
                 self._set_pgn_replay_autoplay(False, mode=event.mode)  # stop possible auto replay of pgn file
             if event.mode == Mode.PONDER:
                 self.state.newgame_happened = False
-            await self.stop_search_and_clock()
+            if not await self.stop_search_and_clock():
+                return await self._report_failed_engine_stop("interaction mode change")
             if leaving_ponder:
                 # A normal mode selection commits the current PONDER
                 # position.  A restore has already put Tutor and the
@@ -7412,7 +7446,8 @@ class MainLoop:
                     await asyncio.sleep(1)  # mame artwork wait
                 await self.engine.startup(old_options, self.state.rating)
                 ModeInfo.set_retro_features(self.engine.get_mame_capabilities().retro_info())
-                await self.stop_search_and_clock()
+                if not await self.stop_search_and_clock():
+                    return await self._report_failed_engine_stop("retro speed restart")
 
                 if (
                     self.state.dgtmenu.get_engine_rdisplay()
