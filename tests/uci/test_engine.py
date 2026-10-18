@@ -23,6 +23,7 @@ import chess
 import chess.engine
 from chess.engine import EngineTerminatedError, Limit, UciProtocol as RealUciProtocol
 from uci.engine import (
+    ConfigurationStatus,
     ContinuousAnalysis,
     CooperativeUciProtocol,
     EngineLease,
@@ -1440,6 +1441,20 @@ class FailingConfigureProtocol(CooperativeUciProtocol):
         raise self.error
 
 
+class FailOnceConfigureProtocol(CooperativeUciProtocol):
+    """Fail after a direct variant write, then accept the retry."""
+
+    def __init__(self):
+        super().__init__()
+        self.configure_calls = 0
+
+    async def configure(self, options):
+        self.configure_calls += 1
+        if self.configure_calls == 1:
+            raise OSError("first configure failed")
+        return await super().configure(options)
+
+
 class TestEngineRecoveryProtocol(unittest.IsolatedAsyncioTestCase):
     async def _protocol(self, protocol=None, transport_class=chess.engine.MockTransport):
         protocol = protocol or CooperativeUciProtocol()
@@ -1449,6 +1464,9 @@ class TestEngineRecoveryProtocol(unittest.IsolatedAsyncioTestCase):
             [
                 "id name Recovery Test",
                 "option name Threads type spin default 1 min 1 max 8",
+                "option name Hash type spin default 16 min 1 max 1024",
+                "option name UCI_Elo type spin default 1200 min 500 max 3000",
+                "option name UCI_Variant type combo default chess var chess var atomic",
                 "uciok",
             ],
         )
@@ -1569,6 +1587,157 @@ class TestEngineRecoveryProtocol(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(protocol.returncode.done())
         transport.assert_done()
 
+    async def test_all_options_are_validated_before_first_setoption(self):
+        protocol, transport = await self._protocol()
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+
+        result = await eng.configure_options({"Threads": 2, "Hash": 2048})
+
+        self.assertEqual(ConfigurationStatus.REJECTED, result.status)
+        self.assertEqual("Hash", result.option_name)
+        self.assertEqual(1, protocol.config["Threads"])
+        self.assertEqual(16, protocol.config["Hash"])
+        transport.assert_done()
+
+    async def test_failed_startup_does_not_publish_candidate_state(self):
+        protocol, transport = await self._protocol()
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.options = {"Threads": 1}
+        eng.variant = "chess"
+        eng.engine_name = "Existing Name"
+        eng._analysis_allowed = True
+
+        configured = await eng.startup(
+            {"Name": "Candidate Name", "Variant": "atomic", "Threads": 2, "Hash": 2048}
+        )
+
+        self.assertFalse(configured)
+        self.assertEqual({"Threads": 1}, eng.options)
+        self.assertEqual("chess", eng.variant)
+        self.assertEqual("Existing Name", eng.engine_name)
+        self.assertTrue(eng._analysis_allowed)
+        self.assertEqual(1, protocol.config["Threads"])
+        self.assertEqual(16, protocol.config["Hash"])
+        transport.assert_done()
+
+    async def test_startup_publishes_candidate_only_after_configuration_finishes(self):
+        configure_started = asyncio.Event()
+        release_configure = asyncio.Event()
+        protocol, transport = await self._protocol(
+            PausingConfigureProtocol(configure_started, release_configure)
+        )
+        transport.expect("setoption name Threads value 2")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.options = {"Threads": 1}
+        eng.variant = "chess"
+        eng.engine_name = "Existing Name"
+        eng.legacy_analysis_mode = False
+
+        startup = asyncio.create_task(
+            eng.startup(
+                {
+                    "Name": "Candidate Name",
+                    "Variant": "atomic",
+                    "Analysis": "false",
+                    "Threads": 2,
+                    "PicoDepth": 20,
+                }
+            )
+        )
+        await configure_started.wait()
+
+        self.assertEqual({"Threads": 1}, eng.options)
+        self.assertEqual("chess", eng.variant)
+        self.assertEqual("Existing Name", eng.engine_name)
+        self.assertFalse(eng.legacy_analysis_mode)
+
+        release_configure.set()
+        self.assertTrue(await startup)
+        self.assertEqual({"Threads": 2, "PicoDepth": 20}, eng.options)
+        self.assertEqual("atomic", eng.variant)
+        self.assertEqual("Candidate Name", eng.engine_name)
+        self.assertTrue(eng.legacy_analysis_mode)
+        transport.assert_done()
+
+    async def test_level_change_sends_only_a_changed_uci_variant(self):
+        protocol, transport = await self._protocol()
+        transport.expect("setoption name UCI_Variant value chess")
+        transport.expect("setoption name UCI_Variant value atomic")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+
+        self.assertTrue(await eng.startup({"UCI_Variant": "chess"}))
+        self.assertTrue(await eng.startup({"UCI_Variant": "atomic"}))
+        self.assertTrue(await eng.startup({"UCI_Variant": "atomic"}))
+
+        self.assertEqual("atomic", eng.uci_variant)
+        self.assertEqual("atomic", eng._variant_sent_value)
+        transport.assert_done()
+
+    async def test_variant_is_not_resent_after_later_configuration_failure(self):
+        protocol, transport = await self._protocol(FailOnceConfigureProtocol())
+        transport.expect("setoption name UCI_Variant value atomic")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+
+        self.assertFalse(await eng.startup({"UCI_Variant": "atomic"}))
+        self.assertIsNone(eng.uci_variant)
+        self.assertEqual("atomic", eng._variant_sent_value)
+        self.assertTrue(await eng.startup({"UCI_Variant": "atomic"}))
+
+        self.assertEqual("atomic", eng.uci_variant)
+        self.assertEqual(2, protocol.configure_calls)
+        transport.assert_done()
+
+    async def test_cancelled_startup_propagates_cancellation(self):
+        configure_started = asyncio.Event()
+        release_configure = asyncio.Event()
+        protocol, transport = await self._protocol(
+            PausingConfigureProtocol(configure_started, release_configure)
+        )
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng._analysis_allowed = True
+
+        startup = asyncio.create_task(eng.startup({"Threads": 2}))
+        await configure_started.wait()
+        startup.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await startup
+        self.assertTrue(eng._analysis_allowed)
+        transport.assert_done()
+
+    async def test_shared_configuration_reports_cancellation_without_publishing(self):
+        configure_started = asyncio.Event()
+        release_configure = asyncio.Event()
+        protocol, transport = await self._protocol(
+            PausingConfigureProtocol(configure_started, release_configure)
+        )
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+
+        configuration = asyncio.create_task(eng.configure_options({"Threads": 2}))
+        await configure_started.wait()
+        configuration.cancel()
+        result = await configuration
+
+        self.assertEqual(ConfigurationStatus.CANCELLED, result.status)
+        self.assertTrue(result.may_be_partial)
+        self.assertEqual(1, protocol.config["Threads"])
+        self.assertEqual(16, protocol.config["Hash"])
+        transport.assert_done()
+
     async def test_terminated_protocol_is_not_treated_as_configuration_success(self):
         protocol, transport = await self._protocol()
         protocol.connection_lost(None)
@@ -1580,6 +1749,15 @@ class TestEngineRecoveryProtocol(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await eng.send(strict=True))
         self.assertTrue(protocol.returncode.done())
         transport.assert_done()
+
+    async def test_default_send_returns_explicit_failure_for_unavailable_engine(self):
+        eng = self._engine()
+        eng.engine = None
+
+        result = await eng.send()
+
+        self.assertEqual(ConfigurationStatus.TRANSPORT_FAILURE, result.status)
+        self.assertFalse(result)
 
     async def test_default_send_preserves_io_exception_behavior(self):
         for error in (OSError("I/O failed"), asyncio.InvalidStateError("invalid state")):
@@ -1603,6 +1781,68 @@ class TestEngineRecoveryProtocol(unittest.IsolatedAsyncioTestCase):
 
                 self.assertFalse(await eng.send(strict=True))
                 transport.assert_done()
+
+    async def test_transport_failure_reports_possible_partial_application(self):
+        protocol, transport = await self._protocol(
+            FailingConfigureProtocol(OSError("I/O failed"))
+        )
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+
+        result = await eng.configure_options({"Threads": 2})
+
+        self.assertEqual(ConfigurationStatus.TRANSPORT_FAILURE, result.status)
+        self.assertTrue(result.may_be_partial)
+        transport.assert_done()
+
+    async def test_failed_rating_update_saves_player_but_keeps_engine_state(self):
+        protocol, transport = await self._protocol(
+            FailingConfigureProtocol(OSError("I/O failed"))
+        )
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.options = {UCI_ELO: "1200"}
+        eng.engine_rating = 1200
+        eng.is_adaptive = True
+        eng.uci_elo_eval_fn = None
+        old_rating = Rating(1250, 60)
+
+        with patch.object(eng, "_save_rating") as save_rating:
+            returned = await eng.update_rating(old_rating, Result.WIN)
+
+        self.assertIsNot(old_rating, returned)
+        self.assertEqual({UCI_ELO: "1200"}, eng.options)
+        self.assertEqual(1200, eng.engine_rating)
+        save_rating.assert_called_once_with(returned)
+        transport.assert_done()
+
+    async def test_cancelled_rating_update_saves_player_and_propagates(self):
+        configure_started = asyncio.Event()
+        release_configure = asyncio.Event()
+        protocol, transport = await self._protocol(
+            PausingConfigureProtocol(configure_started, release_configure)
+        )
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.options = {UCI_ELO: "1200"}
+        eng.engine_rating = 1200
+        eng.is_adaptive = True
+        old_rating = Rating(1250, 60)
+
+        with patch.object(eng, "_save_rating") as save_rating:
+            update = asyncio.create_task(eng.update_rating(old_rating, Result.WIN))
+            await configure_started.wait()
+            update.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await update
+
+        save_rating.assert_called_once()
+        self.assertEqual({UCI_ELO: "1200"}, eng.options)
+        self.assertEqual(1200, eng.engine_rating)
+        transport.assert_done()
 
     async def test_failed_direct_variant_write_does_not_complete_recovery(self):
         protocol, transport = await self._protocol(transport_class=VariantFailingTransport)

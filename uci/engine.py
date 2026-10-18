@@ -23,6 +23,7 @@ import asyncio
 from asyncio import CancelledError
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum, auto
 import os
 import re
 import traceback
@@ -164,6 +165,43 @@ class MameCapabilities:
             "edit": self.edit,
             "info": self.info,
         }
+
+
+class ConfigurationStatus(Enum):
+    """Outcome of one complete engine option transaction."""
+
+    SUCCESS = auto()
+    REJECTED = auto()
+    TRANSPORT_FAILURE = auto()
+    CANCELLED = auto()
+
+
+@dataclass(frozen=True)
+class ConfigurationResult:
+    """Result returned by the shared option configuration path."""
+
+    status: ConfigurationStatus
+    option_name: str | None = None
+    error: BaseException | None = None
+    may_be_partial: bool = False
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status is ConfigurationStatus.SUCCESS
+
+    def __bool__(self) -> bool:
+        """Keep existing boolean call sites compatible with the richer result."""
+        return self.succeeded
+
+
+@dataclass(frozen=True)
+class RatingConfiguration:
+    """Rating-dependent state prepared without publishing it."""
+
+    options: dict
+    engine_rating: int = -1
+    is_adaptive: bool = False
+    uci_elo_eval_fn: str | None = None
 
 
 class CooperativeUciProtocol(UciProtocol):
@@ -1258,7 +1296,9 @@ class UciEngine(object):
         self.game_id = 1
         self.variant = "chess"  # Chess variant, read from .uci file (e.g., "3check")
         self.uci_variant = None  # UCI_Variant value to send directly to engine (bypasses python-chess)
-        self._variant_sent = False  # True once UCI_Variant has been sent; prevents crashing mid-game resend
+        # Remember the value written to this engine process. Re-sending the
+        # same UCI_Variant mid-game can crash Fairy-Stockfish.
+        self._variant_sent_value = None
         # Whether to suppress early/verbose info lines (used for remote main engine, not for tutor).
         self.suppress_info = suppress_info
         # Remote engine settings (asyncssh)
@@ -1470,9 +1510,14 @@ class UciEngine(object):
                 await self._after_engine_started()
 
             if self.engine and self._set_engine_name():
-                self._variant_sent = False  # new engine process — allow UCI_Variant to be sent again
+                self._variant_sent_value = None
                 configured = await self.send(strict=True)
-                if configured and self._engine_process_alive():
+                configuration_succeeded = (
+                    configured.succeeded
+                    if isinstance(configured, ConfigurationResult)
+                    else bool(configured)
+                )
+                if configuration_succeeded and self._engine_process_alive():
                     self._analysis_allowed = True
                     return True
                 if not self._engine_process_alive():
@@ -1541,7 +1586,7 @@ class UciEngine(object):
                         await self._after_engine_started()
 
                     if self.engine and self._set_engine_name():
-                        self._variant_sent = False  # new engine process — allow UCI_Variant to be sent again
+                        self._variant_sent_value = None
                         should_send_options = True
                 except Exception:
                     logger.exception("failed to recover engine after dirty analyser stop")
@@ -1554,7 +1599,12 @@ class UciEngine(object):
                 # takes engine_lock for configure(), while recovery_lock keeps a
                 # second recovery from replacing this freshly started engine.
                 configured = await self.send(strict=True)
-                if not configured or not self._engine_process_alive():
+                configuration_succeeded = (
+                    configured.succeeded
+                    if isinstance(configured, ConfigurationResult)
+                    else bool(configured)
+                )
+                if not configuration_succeeded or not self._engine_process_alive():
                     if not self._engine_process_alive():
                         await self._discard_dead_engine()
                     return False
@@ -1645,64 +1695,120 @@ class UciEngine(object):
             if k in allowed and k.lower() not in managed
         }
 
-    async def send(self, *, strict: bool = False) -> bool:
-        """Send options to engine and report whether configuration completed."""
+    async def configure_options(
+        self,
+        wanted: dict,
+        *,
+        uci_variant=None,
+        send_uci_variant: bool = False,
+    ) -> ConfigurationResult:
+        """Validate and apply one complete option set to the current engine.
+
+        Every requested value is parsed before the first command is written.
+        Callers may therefore publish configuration-dependent PicoChess state
+        only after this method reports success.
+        """
         if not self.engine:
-            logger.warning("send called but no engine is loaded")
-            return False
-        options = {}
-        try:
-            # Handle UCI_Variant separately - python-chess blocks this in configure()
-            # Send it directly to the engine instead. Check both instance variable and
-            # options dict (in case new UCI_Variant was added from .uci file during level change)
-            if "UCI_Variant" in self.options:
-                self.uci_variant = self.options["UCI_Variant"]
-                del self.options["UCI_Variant"]
+            logger.warning("configuration requested but no engine is loaded")
+            return ConfigurationResult(ConfigurationStatus.TRANSPORT_FAILURE)
 
-            # Send UCI_Variant directly to engine if set (bypasses python-chess blocking).
-            # Only send once per engine lifetime to avoid crashing variant engines (e.g.,
-            # Fairy-Stockfish SIGSEGV when UCI_Variant is re-sent mid-game).
-            if self.uci_variant and not self._variant_sent:
-                try:
-                    self.engine.send_line(f"setoption name UCI_Variant value {self.uci_variant}")
-                    self._variant_sent = True
-                    logger.info("Sent UCI_Variant=%s directly to engine", self.uci_variant)
-                except Exception as e:
-                    logger.warning("Failed to send UCI_Variant to engine: %s", e)
-                    if strict:
-                        return False
+        async with self.engine_lock:
+            engine = self.engine
+            options = self.filter_options(wanted, engine.options)
+            parsed_options = {}
+            option_name = None
+            try:
+                # UCI_Variant is managed by python-chess and must be written
+                # directly, but it still belongs to this validation contract.
+                validation_options = dict(options)
+                if send_uci_variant and uci_variant is not None and "UCI_Variant" in engine.options:
+                    validation_options["UCI_Variant"] = uci_variant
+                for option_name, value in validation_options.items():
+                    option = engine.options[option_name]
+                    parsed_options[option_name] = option.parse(value) if hasattr(option, "parse") else value
+            except (chess.engine.EngineError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "engine rejected configuration option %s (%s)",
+                    option_name,
+                    type(exc).__name__,
+                )
+                return ConfigurationResult(ConfigurationStatus.REJECTED, option_name)
 
-            # issue 85 - remove options not allowed by engine before sending
-            options = self.filter_options(self.options, self.engine.options)
-            async with self.engine_lock:
-                await self.engine.configure(options)
-            return True
-        except chess.engine.EngineTerminatedError as e:
-            logger.warning("engine terminated while configuring options %s: %s", list(options), e)
-            return False
-        except OSError as e:
-            logger.warning("engine I/O failed while configuring options %s: %s", list(options), e)
-            if strict:
-                return False
-            raise
-        except chess.engine.EngineError as e:
-            logger.warning("engine rejected configuration options %s: %s", list(options), e)
-            return False
-        except AssertionError as e:
-            # Engine may not be ready (e.g., CommandState.NEW after a recent stop/cancel).
-            # Log the error but don't propagate — callers must not crash on option changes.
-            logger.warning("engine.configure() failed (engine busy or cancelled): %s", e)
-            return False
-        except asyncio.InvalidStateError as e:
-            logger.warning("engine.configure() failed with invalid command state: %s", e)
-            if strict:
-                return False
-            raise
-        except asyncio.CancelledError:
-            logger.warning("engine.configure() was cancelled")
-            if strict:
-                raise
-            return False
+            parsed_variant = parsed_options.pop("UCI_Variant", uci_variant)
+            commands_may_be_sent = bool(parsed_options) or bool(
+                send_uci_variant and parsed_variant is not None
+            )
+            try:
+                if send_uci_variant and parsed_variant is not None:
+                    engine.send_line(f"setoption name UCI_Variant value {parsed_variant}")
+                    # Record this immediately: later configure() calls may fail,
+                    # but this direct command has already reached the process.
+                    self._variant_sent_value = parsed_variant
+                    logger.info("sent UCI_Variant option to engine")
+                await engine.configure(parsed_options)
+                if engine.returncode.done():
+                    logger.warning("engine terminated while configuring options %s", list(parsed_options))
+                    return ConfigurationResult(
+                        ConfigurationStatus.TRANSPORT_FAILURE,
+                        may_be_partial=commands_may_be_sent,
+                    )
+                return ConfigurationResult(ConfigurationStatus.SUCCESS)
+            # python-chess also reports invalid command state (for example
+            # CommandState.NEW while busy) as AssertionError. Treat that as a
+            # protocol/transport failure rather than an option rejection.
+            except (chess.engine.EngineTerminatedError, OSError, asyncio.InvalidStateError, AssertionError) as exc:
+                logger.warning("engine transport failed while configuring options %s: %s", list(parsed_options), exc)
+                return ConfigurationResult(
+                    ConfigurationStatus.TRANSPORT_FAILURE,
+                    error=exc,
+                    may_be_partial=commands_may_be_sent,
+                )
+            except chess.engine.EngineError as exc:
+                logger.warning(
+                    "engine rejected configuration option %s (%s)",
+                    option_name,
+                    type(exc).__name__,
+                )
+                return ConfigurationResult(
+                    ConfigurationStatus.REJECTED,
+                    option_name,
+                    exc,
+                    may_be_partial=commands_may_be_sent,
+                )
+            except asyncio.CancelledError as exc:
+                logger.warning("engine configuration was cancelled")
+                return ConfigurationResult(
+                    ConfigurationStatus.CANCELLED,
+                    error=exc,
+                    may_be_partial=commands_may_be_sent,
+                )
+
+    async def send(self, *, strict: bool = False) -> ConfigurationResult:
+        """Apply published options and return the complete transaction outcome."""
+        wanted = self.options.copy()
+        requested_variant = wanted.pop("UCI_Variant", self.uci_variant)
+        send_variant = bool(requested_variant is not None and requested_variant != self._variant_sent_value)
+        result = await self.configure_options(
+            wanted,
+            uci_variant=requested_variant,
+            send_uci_variant=send_variant,
+        )
+        if result.succeeded:
+            self.options = wanted
+            self.uci_variant = requested_variant
+            return result
+        self._raise_if_configuration_cancelled(result)
+        if not strict and isinstance(result.error, (OSError, asyncio.InvalidStateError)):
+            raise result.error
+        return result
+
+    @staticmethod
+    def _raise_if_configuration_cancelled(result: ConfigurationResult):
+        """Preserve asyncio cancellation at transaction call boundaries."""
+        if result.status is ConfigurationStatus.CANCELLED:
+            if isinstance(result.error, asyncio.CancelledError):
+                raise result.error
+            raise asyncio.CancelledError
 
     def has_levels(self):
         """Return engine level support."""
@@ -2309,6 +2415,7 @@ class UciEngine(object):
 
     async def startup(self, options: dict, rating: Optional[Rating] = None) -> bool:
         """Startup engine. Returns True on success, False on invalid config."""
+        previous_analysis_allowed = self._analysis_allowed
         self._analysis_allowed = False
         parser = configparser.ConfigParser()
         parser.optionxform = str  # type: ignore
@@ -2321,49 +2428,61 @@ class UciEngine(object):
                     options = dict(parser[sections.pop()])
                 else:
                     logger.warning("uci file has no sections: %s.uci", self.get_file())
+                    self._analysis_allowed = previous_analysis_allowed
                     return False
 
-        self.level_support = bool(options)
-
-        self.options = options.copy()
+        level_support = bool(options)
+        candidate_options = options.copy()
 
         # Name is a PicoChess display-name override, not an option for the UCI
         # engine. In .uci files it normally comes from the DEFAULT section and
         # is inherited by each level section.
-        if "Name" in self.options:
-            configured_name = str(self.options.pop("Name")).strip()
-            if configured_name:
-                self.engine_name_override = configured_name
-                self.engine_name = configured_name
+        configured_name = None
+        if "Name" in candidate_options:
+            configured_name = str(candidate_options.pop("Name")).strip() or None
 
         # Extract PicoChess-specific Variant option (not sent to engine via configure())
         # This allows .uci files to specify a chess variant like "3check"
-        if "Variant" in self.options:
-            self.variant = self.options["Variant"]
-            del self.options["Variant"]
-            logger.info("Engine variant set to: %s", self.variant)
-        else:
-            self.variant = "chess"
+        candidate_variant = candidate_options.pop("Variant", "chess")
 
         # Handle UCI_Variant separately - python-chess blocks this option in configure()
         # because it "automatically manages" it based on board type. We send it directly
         # to the engine before configure() is called. Store it in instance variable so
         # it can be re-sent when options change (e.g., level changes).
-        if "UCI_Variant" in self.options:
-            self.uci_variant = self.options["UCI_Variant"]
-            del self.options["UCI_Variant"]
-            logger.info("UCI_Variant will be sent directly to engine: %s", self.uci_variant)
+        candidate_uci_variant = candidate_options.pop("UCI_Variant", self.uci_variant)
 
-        analysis_option = None
-        if "Analysis" in self.options:
-            analysis_option = self.options["Analysis"]
-            del self.options["Analysis"]
+        analysis_option = candidate_options.pop("Analysis", None)
         allow_analysis = self._parse_bool_flag(analysis_option) if analysis_option is not None else True
+        rating_configuration = self._prepare_engine_rating(candidate_options, rating)
+        send_variant = bool(
+            candidate_uci_variant is not None
+            and candidate_uci_variant != self._variant_sent_value
+        )
+        logger.debug("setting engine option names %s", list(rating_configuration.options))
+        result = await self.configure_options(
+            rating_configuration.options,
+            uci_variant=candidate_uci_variant,
+            send_uci_variant=send_variant,
+        )
+        if result.status is ConfigurationStatus.CANCELLED:
+            self._analysis_allowed = previous_analysis_allowed
+            self._raise_if_configuration_cancelled(result)
+        if not result.succeeded:
+            self._analysis_allowed = previous_analysis_allowed
+            return False
+
+        # Publish the complete candidate only after every option was accepted.
+        self.level_support = level_support
+        self.options = rating_configuration.options
+        self.variant = candidate_variant
+        self.uci_variant = candidate_uci_variant
         self.legacy_analysis_mode = not allow_analysis
-        self._engine_rating(rating)
-        self._variant_sent = False  # (re-)starting engine config — allow UCI_Variant to be sent
-        logger.debug("setting engine with options %s", self.options)
-        await self.send()
+        self.engine_rating = rating_configuration.engine_rating
+        self.is_adaptive = rating_configuration.is_adaptive
+        self.uci_elo_eval_fn = rating_configuration.uci_elo_eval_fn
+        if configured_name is not None:
+            self.engine_name_override = configured_name
+            self.engine_name = configured_name
         self._apply_playing_mode_policy()
 
         logger.debug("Loaded engine [%s]", self.get_name())
@@ -2386,35 +2505,48 @@ class UciEngine(object):
             return False
         return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
 
-    def _engine_rating(self, rating: Optional[Rating] = None):
-        """
-        Set engine_rating; replace UCI_Elo 'auto' value with rating.
-        Delete UCI_Elo from the options if no rating is given.
-        """
+    def _prepare_engine_rating(self, options: dict, rating: Optional[Rating] = None) -> RatingConfiguration:
+        """Build rating-dependent options without changing published state."""
+        candidate = options.copy()
+        engine_rating = -1
+        is_adaptive = False
+        uci_elo_eval_fn = None
         uci_elo_option_string = None
-        if UCI_ELO in self.options:
+        if UCI_ELO in candidate:
             uci_elo_option_string = UCI_ELO
-        elif UCI_ELO_NON_STANDARD in self.options:
+        elif UCI_ELO_NON_STANDARD in candidate:
             uci_elo_option_string = UCI_ELO_NON_STANDARD
-        elif UCI_ELO_NON_STANDARD2 in self.options:
+        elif UCI_ELO_NON_STANDARD2 in candidate:
             uci_elo_option_string = UCI_ELO_NON_STANDARD2
         if uci_elo_option_string is not None:
-            uci_elo_option = self.options[uci_elo_option_string].strip()
+            uci_elo_option = candidate[uci_elo_option_string].strip()
             if uci_elo_option.lower() == "auto" and rating is not None:
-                self._set_rating(self._round_engine_rating(int(rating.rating)))
+                engine_rating = self._round_engine_rating(int(rating.rating))
+                candidate[uci_elo_option_string] = str(engine_rating)
+                is_adaptive = True
             elif uci_elo_option.isnumeric():
-                self.engine_rating = int(uci_elo_option)
+                engine_rating = int(uci_elo_option)
             elif "auto" in uci_elo_option and rating is not None:
                 uci_elo_with_rating = uci_elo_option.replace("auto", str(int(rating.rating)))
                 try:
-                    evaluated = safe_eval_elo(uci_elo_with_rating)
-                    self._set_rating(evaluated)
-                    self.uci_elo_eval_fn = uci_elo_option  # save evaluation function for updating engine ELO later
+                    engine_rating = safe_eval_elo(uci_elo_with_rating)
+                    candidate[uci_elo_option_string] = str(engine_rating)
+                    is_adaptive = True
+                    uci_elo_eval_fn = uci_elo_option
                 except (ValueError, ZeroDivisionError) as e:
                     logger.error("invalid option set for %s=%s, exception=%s", uci_elo_option_string, uci_elo_with_rating, e)
-                    del self.options[uci_elo_option_string]
+                    del candidate[uci_elo_option_string]
             else:
-                del self.options[uci_elo_option_string]
+                del candidate[uci_elo_option_string]
+        return RatingConfiguration(candidate, engine_rating, is_adaptive, uci_elo_eval_fn)
+
+    def _engine_rating(self, rating: Optional[Rating] = None):
+        """Apply rating preparation to the currently published options."""
+        prepared = self._prepare_engine_rating(self.options, rating)
+        self.options = prepared.options
+        self.engine_rating = prepared.engine_rating
+        self.is_adaptive = prepared.is_adaptive
+        self.uci_elo_eval_fn = prepared.uci_elo_eval_fn
 
     def _set_rating(self, value: int):
         self.engine_rating = value
@@ -2430,29 +2562,43 @@ class UciEngine(object):
         if not self.is_adaptive or result is None or self.engine_rating < 0:
             return rating
         new_rating = rating.rate(Rating(self.engine_rating, 0), result)
-        if self.uci_elo_eval_fn is not None:
+        candidate_eval_fn = self.uci_elo_eval_fn
+        if candidate_eval_fn is not None:
             # evaluation function instead of auto?
-            uci_elo_with_rating = self.uci_elo_eval_fn.replace("auto", str(int(new_rating.rating)))
+            uci_elo_with_rating = candidate_eval_fn.replace("auto", str(int(new_rating.rating)))
             try:
-                self.engine_rating = safe_eval_elo(uci_elo_with_rating)
+                candidate_engine_rating = safe_eval_elo(uci_elo_with_rating)
             except (ValueError, ArithmeticError) as e:
                 logger.error("invalid UCI_Elo update expression=%s, exception=%s", uci_elo_with_rating, e)
-                self.uci_elo_eval_fn = None
-                self.engine_rating = self._round_engine_rating(int(new_rating.rating))
+                candidate_eval_fn = None
+                candidate_engine_rating = self._round_engine_rating(int(new_rating.rating))
         else:
-            self.engine_rating = self._round_engine_rating(int(new_rating.rating))
+            candidate_engine_rating = self._round_engine_rating(int(new_rating.rating))
+        candidate_options = self.options.copy()
+        self._set_uci_elo_value(candidate_options, candidate_engine_rating)
+        # This is the player's completed-game result and must be persisted
+        # independently of whether the engine accepts its new strength.
         self._save_rating(new_rating)
-        self._set_uci_elo_to_engine_rating()
-        await self.send()
+        configured = await self.configure_options(candidate_options)
+        self._raise_if_configuration_cancelled(configured)
+        if not configured.succeeded:
+            return new_rating
+        self.options = candidate_options
+        self.engine_rating = candidate_engine_rating
+        self.uci_elo_eval_fn = candidate_eval_fn
         return new_rating
 
     def _set_uci_elo_to_engine_rating(self):
-        if UCI_ELO in self.options:
-            self.options[UCI_ELO] = str(int(self.engine_rating))
-        elif UCI_ELO_NON_STANDARD in self.options:
-            self.options[UCI_ELO_NON_STANDARD] = str(int(self.engine_rating))
-        elif UCI_ELO_NON_STANDARD2 in self.options:
-            self.options[UCI_ELO_NON_STANDARD2] = str(int(self.engine_rating))
+        self._set_uci_elo_value(self.options, self.engine_rating)
+
+    @staticmethod
+    def _set_uci_elo_value(options: dict, engine_rating: int):
+        if UCI_ELO in options:
+            options[UCI_ELO] = str(int(engine_rating))
+        elif UCI_ELO_NON_STANDARD in options:
+            options[UCI_ELO_NON_STANDARD] = str(int(engine_rating))
+        elif UCI_ELO_NON_STANDARD2 in options:
+            options[UCI_ELO_NON_STANDARD2] = str(int(engine_rating))
 
     def _save_rating(self, new_rating: Rating):
         write_picochess_ini("pgn-elo", max(500, int(new_rating.rating)))
