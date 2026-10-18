@@ -204,6 +204,31 @@ class RatingConfiguration:
     uci_elo_eval_fn: str | None = None
 
 
+@dataclass(frozen=True)
+class EngineConfigurationCandidate:
+    """Complete unpublished PicoChess state for one option transaction."""
+
+    options: dict
+    level_support: bool
+    variant: str
+    uci_variant: object
+    legacy_analysis_mode: bool
+    engine_rating: int
+    is_adaptive: bool
+    uci_elo_eval_fn: str | None
+    configured_name: str | None
+
+
+@dataclass(frozen=True)
+class LevelConfigurationRequest:
+    """One ordered runtime level request owned by the configuration worker."""
+
+    request_id: int
+    options: dict
+    rating: Rating | None
+    completed: asyncio.Future
+
+
 class CooperativeUciProtocol(UciProtocol):
     """Parse engine output in ordered batches without monopolising the shared loop."""
 
@@ -380,7 +405,7 @@ class EngineLease:
 
         try:
             await self._lock.acquire()
-        except Exception:
+        except BaseException:
             if requester and self._requester == requester:
                 self._requester = None
                 self._interrupt_event.clear()
@@ -1289,6 +1314,14 @@ class UciEngine(object):
         # same failed engine generation.
         self._recovery_lock = asyncio.Lock()
         self._recovery_generation = 0
+        # Global lock order: EngineLease -> _recovery_lock -> engine_lock.
+        # Runtime level changes use all three; other paths must preserve this
+        # relative order for the locks they need.
+        self._configuration_ready = asyncio.Event()
+        self._configuration_ready.set()
+        self._level_request_id = 0
+        self._pending_level_request: LevelConfigurationRequest | None = None
+        self._level_configuration_worker: asyncio.Task | None = None
         self.engine_lease: EngineLease | None = None
         self._last_analyser_stop_was_forced = False
         self._analysis_allowed = False
@@ -1847,6 +1880,7 @@ class UciEngine(object):
         """Quit engine."""
         self._analysis_allowed = False
         self._shutting_down = True
+        await self._invalidate_level_configuration()
         if self.analyser:
             if not await self.stop_analysis():
                 # Shutdown is the safe fallback: protocol.quit() bypasses
@@ -2125,6 +2159,9 @@ class UciEngine(object):
         parameter game will not change, it is deep copied
         parameter variant_board: optional variant board (e.g., chess.variant.ThreeCheckBoard) that provides
                                  extended FEN for variant-aware engines like Fairy-Stockfish"""
+        # A request which became pending before this search owns the next
+        # configuration boundary. Calculate the search limit only afterwards.
+        await self._configuration_ready.wait()
         if not self.engine:
             logger.error("go called but no engine loaded")
             return
@@ -2415,8 +2452,6 @@ class UciEngine(object):
 
     async def startup(self, options: dict, rating: Optional[Rating] = None) -> bool:
         """Startup engine. Returns True on success, False on invalid config."""
-        previous_analysis_allowed = self._analysis_allowed
-        self._analysis_allowed = False
         parser = configparser.ConfigParser()
         parser.optionxform = str  # type: ignore
 
@@ -2428,9 +2463,17 @@ class UciEngine(object):
                     options = dict(parser[sections.pop()])
                 else:
                     logger.warning("uci file has no sections: %s.uci", self.get_file())
-                    self._analysis_allowed = previous_analysis_allowed
                     return False
 
+        candidate = self._prepare_configuration_candidate(options, rating)
+        result = await self._apply_configuration_candidate(candidate)
+        self._raise_if_configuration_cancelled(result)
+        return result.succeeded
+
+    def _prepare_configuration_candidate(
+        self, options: dict, rating: Optional[Rating]
+    ) -> EngineConfigurationCandidate:
+        """Parse PicoChess option state without publishing or sending it."""
         level_support = bool(options)
         candidate_options = options.copy()
 
@@ -2454,35 +2497,53 @@ class UciEngine(object):
         analysis_option = candidate_options.pop("Analysis", None)
         allow_analysis = self._parse_bool_flag(analysis_option) if analysis_option is not None else True
         rating_configuration = self._prepare_engine_rating(candidate_options, rating)
-        send_variant = bool(
-            candidate_uci_variant is not None
-            and candidate_uci_variant != self._variant_sent_value
-        )
-        logger.debug("setting engine option names %s", list(rating_configuration.options))
-        result = await self.configure_options(
-            rating_configuration.options,
+        return EngineConfigurationCandidate(
+            options=rating_configuration.options,
+            level_support=level_support,
+            variant=candidate_variant,
             uci_variant=candidate_uci_variant,
+            legacy_analysis_mode=not allow_analysis,
+            engine_rating=rating_configuration.engine_rating,
+            is_adaptive=rating_configuration.is_adaptive,
+            uci_elo_eval_fn=rating_configuration.uci_elo_eval_fn,
+            configured_name=configured_name,
+        )
+
+    async def _apply_configuration_candidate(
+        self, candidate: EngineConfigurationCandidate
+    ) -> ConfigurationResult:
+        """Configure the engine and publish the candidate only after success."""
+        previous_analysis_allowed = self._analysis_allowed
+        self._analysis_allowed = False
+        send_variant = bool(
+            candidate.uci_variant is not None
+            and candidate.uci_variant != self._variant_sent_value
+        )
+        logger.debug("setting engine option names %s", list(candidate.options))
+        result = await self.configure_options(
+            candidate.options,
+            uci_variant=candidate.uci_variant,
             send_uci_variant=send_variant,
         )
         if result.status is ConfigurationStatus.CANCELLED:
             self._analysis_allowed = previous_analysis_allowed
-            self._raise_if_configuration_cancelled(result)
+            return result
         if not result.succeeded:
             self._analysis_allowed = previous_analysis_allowed
-            return False
+            return result
 
         # Publish the complete candidate only after every option was accepted.
-        self.level_support = level_support
-        self.options = rating_configuration.options
-        self.variant = candidate_variant
-        self.uci_variant = candidate_uci_variant
-        self.legacy_analysis_mode = not allow_analysis
-        self.engine_rating = rating_configuration.engine_rating
-        self.is_adaptive = rating_configuration.is_adaptive
-        self.uci_elo_eval_fn = rating_configuration.uci_elo_eval_fn
-        if configured_name is not None:
-            self.engine_name_override = configured_name
-            self.engine_name = configured_name
+        self.level_support = candidate.level_support
+        self.options = candidate.options
+        self.variant = candidate.variant
+        self.uci_variant = candidate.uci_variant
+        self.legacy_analysis_mode = candidate.legacy_analysis_mode
+        self.engine_rating = candidate.engine_rating
+        self.is_adaptive = candidate.is_adaptive
+        self.uci_elo_eval_fn = candidate.uci_elo_eval_fn
+        if candidate.configured_name is not None:
+            self.engine_name_override = candidate.configured_name
+            self.engine_name = candidate.configured_name
         self._apply_playing_mode_policy()
 
         logger.debug("Loaded engine [%s]", self.get_name())
@@ -2494,7 +2555,111 @@ class UciEngine(object):
                 self.mame_capabilities.info,
             )
         logger.debug("Supported options [%s]", self.get_options())
-        return True
+        return result
+
+    async def reconfigure_level(self, options: dict, rating: Optional[Rating] = None) -> bool | None:
+        """Queue a runtime level change; return None when superseded/invalidated."""
+        if not options:
+            return True
+        self._level_request_id += 1
+        completed = self.loop.create_future()
+        request = LevelConfigurationRequest(
+            self._level_request_id,
+            options.copy(),
+            rating,
+            completed,
+        )
+        replaced = self._pending_level_request
+        self._pending_level_request = request
+        if replaced is not None and not replaced.completed.done():
+            replaced.completed.set_result(None)
+        self._configuration_ready.clear()
+        if self._level_configuration_worker is None or self._level_configuration_worker.done():
+            self._level_configuration_worker = self.loop.create_task(
+                self._run_level_configuration_worker()
+            )
+        return await asyncio.shield(completed)
+
+    async def _run_level_configuration_worker(self) -> None:
+        """Apply queued levels serially, retaining only the newest pending one."""
+        try:
+            await asyncio.sleep(0)  # allow same-loop requests to coalesce
+            while self._pending_level_request is not None:
+                request = self._pending_level_request
+                self._pending_level_request = None
+                try:
+                    result = await self._run_level_configuration(request)
+                except asyncio.CancelledError:
+                    if not request.completed.done():
+                        request.completed.set_result(None)
+                    raise
+                if not request.completed.done():
+                    request.completed.set_result(result)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            pending = self._pending_level_request
+            if pending is not None and not pending.completed.done():
+                pending.completed.set_result(None)
+            self._pending_level_request = None
+            self._level_configuration_worker = None
+            self._configuration_ready.set()
+
+    async def _run_level_configuration(self, request: LevelConfigurationRequest) -> bool | None:
+        """Own the engine command boundary for one runtime level transaction."""
+        lease = self.engine_lease
+        if lease is None or self._shutting_down:
+            return None
+        lease_acquired = False
+        previous = EngineConfigurationCandidate(
+            options=self.options.copy(),
+            level_support=self.level_support,
+            variant=self.variant,
+            uci_variant=self.uci_variant,
+            legacy_analysis_mode=self.legacy_analysis_mode,
+            engine_rating=self.engine_rating,
+            is_adaptive=self.is_adaptive,
+            uci_elo_eval_fn=self.uci_elo_eval_fn,
+            configured_name=self.engine_name_override,
+        )
+        try:
+            # Do not interrupt an active playing search; it may finish using
+            # the old level. Continuous analysis is cooperative and must yield.
+            await lease.acquire(owner="config", preempt=lease.owner() == "continuous")
+            lease_acquired = True
+            async with self._recovery_lock:
+                if self._shutting_down:
+                    return None
+                if request.request_id != self._level_request_id:
+                    return None
+                candidate = self._prepare_configuration_candidate(request.options, request.rating)
+                configured = await self._apply_configuration_candidate(candidate)
+                if configured.succeeded and self._engine_process_alive():
+                    return True if request.request_id == self._level_request_id else None
+                if configured.may_be_partial and self._engine_process_alive():
+                    rollback = await self._apply_configuration_candidate(previous)
+                    if not rollback.succeeded:
+                        logger.error("failed to restore previous engine level after partial configuration")
+                self._raise_if_configuration_cancelled(configured)
+                return False
+        finally:
+            if lease_acquired:
+                lease.release("config")
+
+    async def _invalidate_level_configuration(self) -> None:
+        """Discard level work belonging to an engine which is being replaced."""
+        pending = self._pending_level_request
+        self._pending_level_request = None
+        if pending is not None and not pending.completed.done():
+            pending.completed.set_result(None)
+        worker = self._level_configuration_worker
+        if worker is not None and worker is not asyncio.current_task() and not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        self._configuration_ready.set()
 
     @staticmethod
     def _parse_bool_flag(value) -> bool:

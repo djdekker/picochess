@@ -23,6 +23,7 @@ import chess
 import chess.engine
 from chess.engine import EngineTerminatedError, Limit, UciProtocol as RealUciProtocol
 from uci.engine import (
+    ConfigurationResult,
     ConfigurationStatus,
     ContinuousAnalysis,
     CooperativeUciProtocol,
@@ -512,6 +513,66 @@ class TestEngine(unittest.IsolatedAsyncioTestCase):
         finally:
             analyser._running = False
             for task in (analyser_task, playing._task, analyser._ready_ping_task):
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+
+    async def test_pending_readiness_ping_safely_hands_lease_to_level_configuration(self):
+        protocol = CooperativeUciProtocol()
+        transport = chess.engine.MockTransport(protocol)
+        transport.expect(
+            "uci",
+            [
+                "id name Level Test",
+                "option name Threads type spin default 1 min 1 max 8",
+                "uciok",
+            ],
+        )
+        await protocol.initialize()
+        protocol.first_game = False
+        protocol.game = 1
+        transport.expect("isready", [])
+
+        lease = EngineLease()
+        eng = UciEngine("some_engine", UciShell(), "", asyncio.get_running_loop())
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = lease
+        eng.playing = Mock()
+        analyser = ContinuousAnalysis(
+            engine=protocol,
+            delay=0,
+            loop=asyncio.get_running_loop(),
+            engine_debug_name="engine",
+            engine_lease=lease,
+        )
+        eng.analyser = analyser
+        analyser.current_game = chess.Board()
+        analyser._running = True
+        analyser_task = asyncio.create_task(analyser._analyse_forever(limit=None, multipv=None))
+        while transport.expectations:
+            await asyncio.sleep(0)
+
+        transport.expect("setoption name Threads value 2")
+        level = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        try:
+            await asyncio.sleep(0.55)
+            self.assertFalse(level.done())
+            self.assertEqual("continuous", lease.owner())
+            self.assertIsNotNone(analyser._ready_ping_task)
+            self.assertFalse(analyser._ready_ping_task.cancelled())
+
+            protocol.pipe_data_received(1, b"readyok\n")
+            self.assertTrue(await asyncio.wait_for(level, timeout=1.0))
+            self.assertEqual(2, protocol.config["Threads"])
+            self.assertIsNone(lease.owner())
+            transport.assert_done()
+        finally:
+            analyser._running = False
+            for task in (analyser_task, analyser._ready_ping_task):
                 if task and not task.done():
                     task.cancel()
                     try:
@@ -1843,6 +1904,231 @@ class TestEngineRecoveryProtocol(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({UCI_ELO: "1200"}, eng.options)
         self.assertEqual(1200, eng.engine_rating)
         transport.assert_done()
+
+    async def test_level_configuration_waits_for_playing_lease(self):
+        protocol, transport = await self._protocol()
+        transport.expect("setoption name Threads value 2")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        await eng.engine_lease.acquire("playing")
+
+        level = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertFalse(level.done())
+        self.assertEqual(1, protocol.config["Threads"])
+        eng.engine_lease.release("playing")
+        self.assertTrue(await level)
+        self.assertEqual(2, protocol.config["Threads"])
+        transport.assert_done()
+
+    async def test_playing_search_finishes_with_old_limit_before_level_applies(self):
+        protocol, transport = await self._protocol()
+        protocol.first_game = False
+        protocol.game = 1
+        transport.expect("position startpos")
+        transport.expect("go depth 1", [])
+        lease = EngineLease()
+        eng = UciEngine("some_engine", UciShell(), "", asyncio.get_running_loop())
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = lease
+        eng.options = {"PicoDepth": 1}
+        eng.playing = PlayingContinuousAnalysis(
+            engine=protocol,
+            loop=asyncio.get_running_loop(),
+            engine_lease=lease,
+            engine_debug_name="engine",
+        )
+        result_queue = asyncio.Queue()
+
+        await eng.go({}, chess.Board(), result_queue, root_moves=None)
+        while transport.expectations:
+            await asyncio.sleep(0)
+        level = asyncio.create_task(eng.reconfigure_level({"PicoDepth": 7}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertFalse(level.done())
+        self.assertEqual({"PicoDepth": 1}, eng.options)
+        protocol.pipe_data_received(1, b"bestmove e2e4\n")
+        result = await asyncio.wait_for(result_queue.get(), timeout=1.0)
+        self.assertEqual(chess.Move.from_uci("e2e4"), result.move)
+        self.assertTrue(await asyncio.wait_for(level, timeout=1.0))
+        self.assertEqual({"PicoDepth": 7}, eng.options)
+        transport.assert_done()
+
+    async def test_concurrent_pending_levels_coalesce_to_latest_request(self):
+        protocol, transport = await self._protocol()
+        transport.expect("setoption name Threads value 3")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+
+        first = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        second = asyncio.create_task(eng.reconfigure_level({"Threads": 3}))
+
+        self.assertEqual([None, True], await asyncio.gather(first, second))
+        self.assertEqual({"Threads": 3}, eng.options)
+        self.assertEqual(3, protocol.config["Threads"])
+        transport.assert_done()
+
+    async def test_newer_level_supersedes_request_waiting_for_playing_search(self):
+        protocol, transport = await self._protocol()
+        transport.expect("setoption name Threads value 3")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        await eng.engine_lease.acquire("playing")
+
+        first = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        second = asyncio.create_task(eng.reconfigure_level({"Threads": 3}))
+        await asyncio.sleep(0)
+        eng.engine_lease.release("playing")
+
+        self.assertEqual([None, True], await asyncio.gather(first, second))
+        self.assertEqual({"Threads": 3}, eng.options)
+        self.assertEqual(3, protocol.config["Threads"])
+        transport.assert_done()
+
+    async def test_go_waits_for_pending_level_before_calculating_limit(self):
+        configure_started = asyncio.Event()
+        release_configure = asyncio.Event()
+        protocol, transport = await self._protocol(
+            PausingConfigureProtocol(configure_started, release_configure)
+        )
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        eng.playing.play_move = AsyncMock()
+        eng.playing.is_waiting_for_move.return_value = False
+
+        level = asyncio.create_task(eng.reconfigure_level({"PicoDepth": 7}))
+        await configure_started.wait()
+        go = asyncio.create_task(
+            eng.go({}, chess.Board(), asyncio.Queue(), root_moves=None)
+        )
+        await asyncio.sleep(0)
+        eng.playing.play_move.assert_not_awaited()
+
+        release_configure.set()
+        self.assertTrue(await level)
+        await go
+        limit = eng.playing.play_move.await_args.kwargs["limit"]
+        self.assertEqual(7, limit.depth)
+        transport.assert_done()
+
+    async def test_failed_level_restores_readiness_and_published_state(self):
+        protocol, transport = await self._protocol(FailOnceConfigureProtocol())
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        eng.options = {"Threads": 1}
+
+        self.assertFalse(await eng.reconfigure_level({"Threads": 2}))
+
+        self.assertTrue(eng._configuration_ready.is_set())
+        self.assertIsNone(eng.engine_lease.owner())
+        self.assertEqual({"Threads": 1}, eng.options)
+        transport.assert_done()
+
+    async def test_cancelled_level_rolls_back_and_releases_coordination(self):
+        protocol, transport = await self._protocol()
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        eng.options = {"Threads": 1}
+        eng.configure_options = AsyncMock(
+            side_effect=[
+                ConfigurationResult(
+                    ConfigurationStatus.CANCELLED,
+                    error=asyncio.CancelledError(),
+                    may_be_partial=True,
+                ),
+                ConfigurationResult(ConfigurationStatus.SUCCESS),
+            ]
+        )
+
+        self.assertIsNone(await eng.reconfigure_level({"Threads": 2}))
+
+        self.assertEqual(2, eng.configure_options.await_count)
+        self.assertEqual({"Threads": 1}, eng.options)
+        self.assertTrue(eng._configuration_ready.is_set())
+        self.assertIsNone(eng.engine_lease.owner())
+        transport.assert_done()
+
+    async def test_invalidating_pending_level_releases_waiters(self):
+        protocol, transport = await self._protocol()
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        await eng.engine_lease.acquire("playing")
+
+        level = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await eng._invalidate_level_configuration()
+
+        self.assertIsNone(await level)
+        self.assertTrue(eng._configuration_ready.is_set())
+        eng.engine_lease.release("playing")
+        transport.assert_done()
+
+    async def test_new_game_does_not_discard_pending_level(self):
+        protocol, transport = await self._protocol()
+        transport.expect("setoption name Threads value 2")
+        eng = self._engine()
+        eng.engine = protocol
+        eng.transport = transport
+        eng.engine_lease = EngineLease()
+        eng.analyser.update_game = AsyncMock()
+        eng.analyser.needs_recovery.return_value = False
+        await eng.engine_lease.acquire("playing")
+
+        level = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await eng.newgame(chess.Board(), send_ucinewgame=False)
+
+        self.assertFalse(level.done())
+        eng.engine_lease.release("playing")
+        self.assertTrue(await level)
+        self.assertEqual({"Threads": 2}, eng.options)
+        transport.assert_done()
+
+    async def test_pending_level_uses_recovery_replacement_protocol(self):
+        old_protocol, old_transport = await self._protocol()
+        replacement_protocol, replacement_transport = await self._protocol()
+        replacement_transport.expect("setoption name Threads value 2")
+        eng = self._engine()
+        eng.engine = old_protocol
+        eng.transport = old_transport
+        eng.engine_lease = EngineLease()
+        await eng.engine_lease.acquire("continuous")
+
+        level = asyncio.create_task(eng.reconfigure_level({"Threads": 2}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        eng.engine = replacement_protocol
+        eng.transport = replacement_transport
+        eng.engine_lease.release("continuous")
+
+        self.assertTrue(await level)
+        self.assertEqual(1, old_protocol.config["Threads"])
+        self.assertEqual(2, replacement_protocol.config["Threads"])
+        old_transport.assert_done()
+        replacement_transport.assert_done()
 
     async def test_failed_direct_variant_write_does_not_complete_recovery(self):
         protocol, transport = await self._protocol(transport_class=VariantFailingTransport)

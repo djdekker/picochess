@@ -169,6 +169,13 @@ that config when no options dict is supplied, takes the selected section, and
 stores a copy in `self.options`. Callers can also pass an options dict directly,
 for example when changing levels or engines.
 
+Engine command coordination has one global lock order:
+`EngineLease` → `_recovery_lock` → `engine_lock`. A path which needs only a
+subset must preserve that relative order. Never hold `engine_lock` while
+waiting for the lease or `_recovery_lock`. Runtime level changes use the
+dedicated configuration lease owner and the shared atomic configuration path;
+they must not call `startup()`.
+
 Keep these option rules intact:
 
 - `self.options` is the stored Picochess view of the configured engine options.

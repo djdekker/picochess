@@ -1,3 +1,4 @@
+import asyncio
 import ast
 import unittest
 from itertools import product
@@ -140,6 +141,63 @@ class TestNewGameHistoryLifecycle(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(StopAfterHistoryCheck):
             await controller.process_main_events(Event.NEW_GAME(pos960=518))
+
+
+class TestLevelConfigurationPublication(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.controller = object.__new__(mainloop.MainLoop)
+        self.controller.state = SimpleNamespace(
+            position_checkpoint_restore_pending=False,
+            rating=None,
+            new_engine_level="old",
+        )
+        self.controller.engine = SimpleNamespace(reconfigure_level=AsyncMock())
+        self.show = AsyncMock()
+        self.display_patch = patch.object(mainloop.DisplayMsg, "show", self.show)
+        self.display_patch.start()
+        self.addCleanup(self.display_patch.stop)
+        self.event = Event.LEVEL(
+            options={"Threads": 2},
+            level_text="Level 2",
+            level_name="2",
+        )
+
+    async def test_level_message_is_published_only_after_configuration_success(self):
+        configuration_started = asyncio.Event()
+        release_configuration = asyncio.Event()
+
+        async def configure(*_args):
+            configuration_started.set()
+            await release_configuration.wait()
+            return True
+
+        self.controller.engine.reconfigure_level.side_effect = configure
+        handling = asyncio.create_task(self.controller.process_main_events(self.event))
+        await configuration_started.wait()
+
+        self.assertEqual("old", self.controller.state.new_engine_level)
+        self.show.assert_not_awaited()
+        release_configuration.set()
+        await handling
+
+        self.assertEqual("2", self.controller.state.new_engine_level)
+        self.assertIsInstance(self.show.await_args.args[0], Message.LEVEL)
+
+    async def test_superseded_level_does_not_publish_or_report_failure(self):
+        self.controller.engine.reconfigure_level.return_value = None
+
+        await self.controller.process_main_events(self.event)
+
+        self.assertEqual("old", self.controller.state.new_engine_level)
+        self.show.assert_not_awaited()
+
+    async def test_failed_level_keeps_visible_level_and_reports_engine_failure(self):
+        self.controller.engine.reconfigure_level.return_value = False
+
+        await self.controller.process_main_events(self.event)
+
+        self.assertEqual("old", self.controller.state.new_engine_level)
+        self.assertIsInstance(self.show.await_args.args[0], Message.ENGINE_FAIL)
 
 
 class TestPicochessAnalysisRouting(unittest.TestCase):

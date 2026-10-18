@@ -5101,9 +5101,12 @@ class MainLoop:
 
         elif isinstance(event, Event.LEVEL):
             if event.options:
-                startup_ok = await self.engine.startup(event.options, self.state.rating)
-                if not startup_ok:
-                    logger.error("engine startup failed; invalid .uci options")
+                configured = await self.engine.reconfigure_level(event.options, self.state.rating)
+                if configured is None:
+                    logger.debug("engine level request superseded or invalidated")
+                    return
+                if not configured:
+                    logger.error("engine level configuration failed; keeping previous level")
                     await DisplayMsg.show(Message.ENGINE_FAIL())
                     return
             self.state.new_engine_level = event.level_name
