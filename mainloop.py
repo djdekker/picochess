@@ -990,7 +990,16 @@ class MainLoop:
             return True
         idle = await self.engine.wait_until_idle(timeout)
         if not idle:
-            logger.warning("engine still not idle after %.1fs", timeout)
+            logger.warning(
+                "engine still not idle after %.1fs; cancelling old search",
+                timeout,
+            )
+            idle = await self.engine.cancel_playing_search(ENGINE_SEARCH_CANCEL_TIMEOUT)
+            if not idle:
+                logger.error(
+                    "engine remained busy after %.1fs cancellation timeout",
+                    ENGINE_SEARCH_CANCEL_TIMEOUT,
+                )
         return idle
 
     async def stop_search_and_clock(self, ponder_hit=False) -> bool:
@@ -2285,10 +2294,10 @@ class MainLoop:
                 self.state.legal_fens_after_cmove = []
                 if self.online_mode():
                     if not await self.stop_search_and_clock():
-                        return await self._report_failed_engine_stop("online game end")
+                        logger.error("online game end continued after failed engine stop")
                     self.state.stop_fen_timer()
                 if not await self.stop_search_and_clock():
-                    return await self._report_failed_engine_stop("game end")
+                    logger.error("game end continued after failed engine stop")
                 await self._show_game_end(game_end, game_generation)
             else:
                 self.state.searchmoves.reset()
@@ -2414,10 +2423,10 @@ class MainLoop:
                 self.state.legal_fens_after_cmove = []
                 if self.online_mode():
                     if not await self.stop_search_and_clock():
-                        return await self._report_failed_engine_stop("online engine game end")
+                        logger.error("online engine game end continued after failed engine stop")
                     self.state.stop_fen_timer()
                 if not await self.stop_search_and_clock():
-                    return await self._report_failed_engine_stop("engine game end")
+                    logger.error("engine game end continued after failed engine stop")
                 if not self.pgn_mode():
                     await self._show_game_end(game_end, game_generation)
             else:
@@ -6346,7 +6355,7 @@ class MainLoop:
                 # this one waits for the search to stop. Its result must not end that game.
                 game_generation = self.state.game_generation
                 if not await self.stop_search_and_clock():
-                    return await self._report_failed_engine_stop("draw or resign")
+                    logger.error("draw or resign continued after failed engine stop")
                 if game_generation != self.state.game_generation:
                     logger.info("dropping game result %s: a new game has started", event.result)
                 else:
@@ -6947,10 +6956,12 @@ class MainLoop:
                                 self.state.legal_fens_after_cmove = []
                                 if self.online_mode():
                                     if not await self.stop_search_and_clock():
-                                        return await self._report_failed_engine_stop("engine move recovery")
+                                        logger.error(
+                                            "online engine game end continued after failed engine stop"
+                                        )
                                     self.state.stop_fen_timer()
                                 if not await self.stop_search_and_clock():
-                                    return await self._report_failed_engine_stop("engine move recovery")
+                                    logger.error("engine game end continued after failed engine stop")
                                 if not self.pgn_mode():
                                     await self._show_game_end(game_end, game_generation)
                             else:

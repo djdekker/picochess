@@ -100,7 +100,14 @@ class TestDeclaredResultAfterNewGame(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("*", ModeInfo.get_game_ending())
 
     async def test_resign_ends_the_game_when_no_new_game_starts(self):
-        self.controller.stop_search_and_clock = AsyncMock()
+        self.controller.stop_search_and_clock = AsyncMock(return_value=True)
+
+        await self.controller.process_main_events(Event.DRAWRESIGN(result=GameResult.WIN_BLACK))
+
+        self.controller._declare_game_result.assert_awaited_once_with(GameResult.WIN_BLACK, 0)
+
+    async def test_failed_stop_does_not_suppress_declared_result(self):
+        self.controller.stop_search_and_clock = AsyncMock(return_value=False)
 
         await self.controller.process_main_events(Event.DRAWRESIGN(result=GameResult.WIN_BLACK))
 

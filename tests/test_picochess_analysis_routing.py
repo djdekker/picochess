@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import inspect
 import unittest
 from itertools import product
 from pathlib import Path
@@ -1412,6 +1413,7 @@ class TestStopSearchTimeout(unittest.IsolatedAsyncioTestCase):
         self.controller.engine.stop = AsyncMock()
         self.controller.engine.consume_forced_analyser_stop.return_value = False
         self.controller.engine.wait_until_idle = AsyncMock(return_value=True)
+        self.controller.engine.cancel_playing_search = AsyncMock(return_value=True)
         self.controller.emulation_mode = Mock(return_value=False)
 
     async def test_default_wait_is_bounded_and_succeeds(self):
@@ -1420,8 +1422,17 @@ class TestStopSearchTimeout(unittest.IsolatedAsyncioTestCase):
             mainloop.ENGINE_SEARCH_IDLE_TIMEOUT
         )
 
-    async def test_timeout_is_reported_to_caller(self):
+    async def test_timeout_escalates_to_playing_search_cancellation(self):
         self.controller.engine.wait_until_idle.return_value = False
+
+        self.assertTrue(await self.controller.stop_search())
+        self.controller.engine.cancel_playing_search.assert_awaited_once_with(
+            mainloop.ENGINE_SEARCH_CANCEL_TIMEOUT
+        )
+
+    async def test_failed_cancellation_is_reported_to_caller(self):
+        self.controller.engine.wait_until_idle.return_value = False
+        self.controller.engine.cancel_playing_search.return_value = False
 
         self.assertFalse(await self.controller.stop_search())
 
@@ -1437,6 +1448,62 @@ class TestStopSearchTimeout(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.controller.stop_search_and_clock())
         self.controller.state.stop_clock.assert_awaited_once_with()
         self.controller.stop_search.assert_awaited_once_with()
+
+
+class TestStopFailureCallSiteAudit(unittest.TestCase):
+    def test_every_stop_search_and_clock_result_is_handled(self):
+        tree = ast.parse(Path(mainloop.__file__).read_text(encoding="utf-8"))
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        stop_awaits = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Await)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "stop_search_and_clock"
+        ]
+
+        self.assertGreater(len(stop_awaits), 20)
+        for node in stop_awaits:
+            negation = parents[node]
+            conditional = parents.get(negation)
+            with self.subTest(line=node.lineno):
+                self.assertIsInstance(negation, ast.UnaryOp)
+                self.assertIsInstance(negation.op, ast.Not)
+                self.assertIsInstance(conditional, ast.If)
+                self.assertIs(conditional.test, negation)
+                descendants = [
+                    descendant
+                    for statement in conditional.body
+                    for descendant in ast.walk(statement)
+                ]
+                aborts_transition = any(
+                    isinstance(descendant, ast.Return) for descendant in descendants
+                )
+                logs_terminal_failure = any(
+                    isinstance(descendant, ast.Call)
+                    and isinstance(descendant.func, ast.Attribute)
+                    and descendant.func.attr == "error"
+                    for descendant in descendants
+                )
+                self.assertTrue(aborts_transition or logs_terminal_failure)
+
+    def test_mame_setup_commands_follow_the_failed_stop_guards(self):
+        process_source = inspect.getsource(mainloop.MainLoop.process_main_events)
+        set_position_guard = process_source.index(
+            '_report_failed_engine_stop("Set Position")'
+        )
+        mame_position_setup = process_source.index("send_position_to_mame=True")
+        self.assertLess(set_position_guard, mame_position_setup)
+
+        read_source = inspect.getsource(mainloop.MainLoop.read_pgn_file)
+        read_guard = read_source.index('_report_failed_engine_stop("Read Game")')
+        read_mame_setup = read_source.index("send_position_to_mame=mame_load")
+        self.assertLess(read_guard, read_mame_setup)
 
 
 class TestInteractionModeSwitch(unittest.IsolatedAsyncioTestCase):
